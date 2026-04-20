@@ -222,6 +222,7 @@ in {
         name = "keycloak";
         username = "keycloak";
         passwordFile = cfg.keycloakDbPasswordFile;
+        useSSL = false;
       };
       settings = {
         hostname = "127.0.0.1";
@@ -258,17 +259,41 @@ in {
       serviceConfig = {
         Type = "oneshot";
         RemainAfterExit = true;
-        User = "postgres";
+        User = "root";
       };
-      path = [ config.services.postgresql.package ];
+      path = [ config.services.postgresql.package pkgs.util-linux pkgs.coreutils ];
       script = ''
         pw="$(cat ${cfg.keycloakDbPasswordFile})"
-        psql -tAc "SELECT 1 FROM pg_roles WHERE rolname='keycloak'" | grep -q 1 \
-          || psql -c "CREATE ROLE keycloak LOGIN PASSWORD '$pw'"
-        psql -c "ALTER ROLE keycloak WITH PASSWORD '$pw'"
-        psql -tAc "SELECT 1 FROM pg_database WHERE datname='keycloak'" | grep -q 1 \
-          || psql -c "CREATE DATABASE keycloak OWNER keycloak"
+        run() { runuser -u postgres -- psql "$@"; }
+        run -tAc "SELECT 1 FROM pg_roles WHERE rolname='keycloak'" | grep -q 1 \
+          || run -c "CREATE ROLE keycloak LOGIN PASSWORD '$pw'"
+        run -c "ALTER ROLE keycloak WITH PASSWORD '$pw'"
+        run -tAc "SELECT 1 FROM pg_database WHERE datname='keycloak'" | grep -q 1 \
+          || run -c "CREATE DATABASE keycloak OWNER keycloak"
       '';
+    };
+
+    # The lxc-container module sets a global `LoadCredential=` reset on every
+    # service, which wipes Keycloak's LoadCredential for its DB password and
+    # causes the start script to blow up on `$CREDENTIALS_DIRECTORY` being
+    # unset. Work around by staging the password into /run ourselves before
+    # start and pointing CREDENTIALS_DIRECTORY at that path.
+    systemd.services.keycloak = lib.mkIf cfg.enableWeb {
+      environment = {
+        CREDENTIALS_DIRECTORY = "/run/keycloak-creds";
+        # Keycloak 26.x: bootstrap a temporary admin so we can log in.
+        # Change this password immediately after first login.
+        KC_BOOTSTRAP_ADMIN_USERNAME = "admin";
+        KC_BOOTSTRAP_ADMIN_PASSWORD = "admin";
+      };
+      serviceConfig = {
+        ExecStartPre = [
+          ("+${pkgs.bash}/bin/bash -c '"
+            + "install -d -m 0755 /run/keycloak-creds && "
+            + "install -m 0444 ${cfg.keycloakDbPasswordFile} "
+            + "/run/keycloak-creds/keycloak-db.pass'")
+        ];
+      };
     };
 
     # --- Ted web (Next.js UI) ---
@@ -277,7 +302,7 @@ in {
       after = [ "ted-webhook.service" "keycloak.service" ];
       requires = [ "ted-webhook.service" ];
       wantedBy = [ "multi-user.target" ];
-      path = [ pkgs.nodejs_22 pkgs.coreutils ];
+      path = [ pkgs.nodejs_22 pkgs.coreutils pkgs.bashInteractive ];
       environment = {
         NODE_ENV = "production";
         PORT = toString cfg.webPort;
@@ -292,7 +317,8 @@ in {
         Group = cfg.group;
         WorkingDirectory = "${cfg.source}/web";
         EnvironmentFile = lib.mkIf (cfg.webEnvironmentFile != null) cfg.webEnvironmentFile;
-        ExecStart = "${pkgs.nodejs_22}/bin/npm run start";
+        # next-start directly to avoid npm+sh dependency; Node is enough.
+        ExecStart = "${pkgs.nodejs_22}/bin/node ${cfg.source}/web/node_modules/next/dist/bin/next start -p ${toString cfg.webPort} -H 127.0.0.1";
         Restart = "always";
         RestartSec = 3;
       };
