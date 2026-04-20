@@ -1,0 +1,77 @@
+import { env } from './env';
+
+/** Fetch helper that injects the X-User-ID header ted's middleware requires. */
+export async function tedFetch(
+  userId: string,
+  path: string,
+  init?: RequestInit,
+): Promise<Response> {
+  const headers = new Headers(init?.headers);
+  headers.set('X-User-ID', userId);
+  return fetch(`${env.tedUrl}${path}`, { ...init, headers });
+}
+
+export type Msg = { role: 'user' | 'assistant'; content: string };
+
+export async function listSessions(userId: string): Promise<
+  Array<{ id: string; title: string | null; updated_at: string }>
+> {
+  const res = await tedFetch(userId, '/sessions');
+  if (!res.ok) throw new Error(`ted /sessions ${res.status}`);
+  const data = (await res.json()) as {
+    sessions: Array<{ id: string; title: string | null; updated_at: string }>;
+  };
+  return data.sessions;
+}
+
+export async function getSessionMessages(
+  userId: string,
+  sessionId: string,
+): Promise<Msg[]> {
+  const res = await tedFetch(userId, `/sessions/${encodeURIComponent(sessionId)}/messages`);
+  if (res.status === 404) return [];
+  if (!res.ok) throw new Error(`ted /messages ${res.status}`);
+  const data = (await res.json()) as { messages: Msg[] };
+  return data.messages;
+}
+
+export async function postMessage(
+  userId: string,
+  sessionId: string,
+  msg: string,
+): Promise<void> {
+  const res = await tedFetch(userId, '/message', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ sessionId, msg }),
+  });
+  if (!res.ok) throw new Error(`ted /message ${res.status}: ${await res.text()}`);
+}
+
+export async function renameSession(
+  userId: string,
+  sessionId: string,
+  title: string,
+): Promise<void> {
+  const res = await tedFetch(userId, `/sessions/${encodeURIComponent(sessionId)}`, {
+    method: 'PATCH',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ title }),
+  });
+  if (!res.ok) throw new Error(`ted /sessions PATCH ${res.status}`);
+}
+
+/**
+ * Open ted's SSE stream for a session. Returns the response so the caller
+ * can pipe the body through to the browser.
+ */
+export async function openStream(
+  userId: string,
+  sessionId: string,
+  signal?: AbortSignal,
+): Promise<Response> {
+  return tedFetch(userId, `/sessions/${encodeURIComponent(sessionId)}/stream`, {
+    headers: { accept: 'text/event-stream' },
+    signal,
+  });
+}

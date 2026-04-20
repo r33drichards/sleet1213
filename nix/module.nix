@@ -73,6 +73,61 @@ in {
       default = false;
       description = "Open the webhook port in the firewall.";
     };
+
+    enableWeb = lib.mkOption {
+      type = lib.types.bool;
+      default = false;
+      description = "Enable the Next.js web UI and Keycloak identity provider.";
+    };
+
+    webPort = lib.mkOption {
+      type = lib.types.port;
+      default = 3000;
+      description = "Port the Next.js UI listens on (bind is always 127.0.0.1).";
+    };
+
+    webBaseUrl = lib.mkOption {
+      type = lib.types.str;
+      default = "http://127.0.0.1:3000";
+      description = "External base URL for the web UI (NEXTAUTH_URL).";
+    };
+
+    webEnvironmentFile = lib.mkOption {
+      type = lib.types.nullOr lib.types.path;
+      default = null;
+      description = ''
+        systemd EnvironmentFile for the web service. Must contain:
+          NEXTAUTH_SECRET, AUTH_KEYCLOAK_ID, AUTH_KEYCLOAK_SECRET.
+      '';
+      example = "/etc/ted/web.env";
+    };
+
+    keycloakPort = lib.mkOption {
+      type = lib.types.port;
+      default = 8080;
+    };
+
+    keycloakBaseUrl = lib.mkOption {
+      type = lib.types.str;
+      default = "http://127.0.0.1:8080";
+      description = "External base URL of Keycloak (used to form the issuer).";
+    };
+
+    keycloakRealm = lib.mkOption {
+      type = lib.types.str;
+      default = "ted";
+      description = "Keycloak realm used for the web UI.";
+    };
+
+    keycloakDbPasswordFile = lib.mkOption {
+      type = lib.types.nullOr lib.types.path;
+      default = null;
+      description = ''
+        File containing the Postgres password for the Keycloak DB user.
+        Required when enableWeb = true.
+      '';
+      example = "/etc/ted/keycloak-db.pass";
+    };
   };
 
   config = lib.mkIf cfg.enable {
@@ -148,6 +203,96 @@ in {
         WorkingDirectory = cfg.source;
         EnvironmentFile = lib.mkIf (cfg.environmentFile != null) cfg.environmentFile;
         ExecStart = "${pkgs.nodejs_22}/bin/node --loader ts-node/esm ${cfg.source}/src/worker.ts";
+        Restart = "always";
+        RestartSec = 3;
+      };
+    };
+
+    # --- Keycloak (identity provider) ---
+    # Enabled with enableWeb. Uses the existing services.postgresql with a
+    # dedicated `keycloak` DB + role. Listens on 127.0.0.1:keycloakPort;
+    # expose publicly via nginx or SSH tunnel.
+    services.keycloak = lib.mkIf cfg.enableWeb {
+      enable = true;
+      database = {
+        type = "postgresql";
+        createLocally = false;
+        host = "127.0.0.1";
+        port = 5432;
+        name = "keycloak";
+        username = "keycloak";
+        passwordFile = cfg.keycloakDbPasswordFile;
+      };
+      settings = {
+        hostname = "127.0.0.1";
+        hostname-strict = false;
+        http-enabled = true;
+        http-host = "127.0.0.1";
+        http-port = cfg.keycloakPort;
+        proxy-headers = "xforwarded";
+      };
+    };
+
+    # Ensure Postgres listens on TCP so Keycloak (JDBC) can connect; peer
+    # auth still works over the socket for ted's own services.
+    services.postgresql.enableTCPIP = lib.mkIf cfg.enableWeb true;
+    services.postgresql.authentication = lib.mkIf cfg.enableWeb (lib.mkOverride 10 ''
+      # Allow Keycloak to connect to its own database over TCP with a password.
+      host    keycloak  keycloak  127.0.0.1/32  md5
+      host    keycloak  keycloak  ::1/128       md5
+      # Local socket peer auth for everything else (defaults).
+      local   all       all                     peer
+      host    all       all       127.0.0.1/32  trust
+      host    all       all       ::1/128       trust
+    '');
+
+    # Create the `keycloak` role + db with the supplied password. Using a
+    # systemd-oneshot after postgresql.service comes up so we can templated
+    # the password into SQL at runtime without committing it.
+    systemd.services.ted-keycloak-db-setup = lib.mkIf cfg.enableWeb {
+      description = "Provision Keycloak Postgres role + database";
+      after = [ "postgresql.service" ];
+      requires = [ "postgresql.service" ];
+      wantedBy = [ "multi-user.target" ];
+      before = [ "keycloak.service" ];
+      serviceConfig = {
+        Type = "oneshot";
+        RemainAfterExit = true;
+        User = "postgres";
+      };
+      path = [ config.services.postgresql.package ];
+      script = ''
+        pw="$(cat ${cfg.keycloakDbPasswordFile})"
+        psql -tAc "SELECT 1 FROM pg_roles WHERE rolname='keycloak'" | grep -q 1 \
+          || psql -c "CREATE ROLE keycloak LOGIN PASSWORD '$pw'"
+        psql -c "ALTER ROLE keycloak WITH PASSWORD '$pw'"
+        psql -tAc "SELECT 1 FROM pg_database WHERE datname='keycloak'" | grep -q 1 \
+          || psql -c "CREATE DATABASE keycloak OWNER keycloak"
+      '';
+    };
+
+    # --- Ted web (Next.js UI) ---
+    systemd.services.ted-web = lib.mkIf cfg.enableWeb {
+      description = "Ted web UI (Next.js)";
+      after = [ "ted-webhook.service" "keycloak.service" ];
+      requires = [ "ted-webhook.service" ];
+      wantedBy = [ "multi-user.target" ];
+      path = [ pkgs.nodejs_22 pkgs.coreutils ];
+      environment = {
+        NODE_ENV = "production";
+        PORT = toString cfg.webPort;
+        HOSTNAME = "127.0.0.1";
+        TED_URL = "http://127.0.0.1:${toString cfg.webhookPort}";
+        NEXTAUTH_URL = cfg.webBaseUrl;
+        AUTH_TRUST_HOST = "true";
+        AUTH_KEYCLOAK_ISSUER = "${cfg.keycloakBaseUrl}/realms/${cfg.keycloakRealm}";
+      };
+      serviceConfig = {
+        User = cfg.user;
+        Group = cfg.group;
+        WorkingDirectory = "${cfg.source}/web";
+        EnvironmentFile = lib.mkIf (cfg.webEnvironmentFile != null) cfg.webEnvironmentFile;
+        ExecStart = "${pkgs.nodejs_22}/bin/npm run start";
         Restart = "always";
         RestartSec = 3;
       };
