@@ -81,6 +81,29 @@ in {
     networking.firewall.allowedTCPPorts =
       lib.mkIf cfg.openFirewall [ cfg.webhookPort ];
 
+    # --- Redis (streaming fan-out) ---
+    services.redis.servers.ted = {
+      enable = true;
+      port = 6379;
+      bind = "127.0.0.1";
+    };
+
+    # --- Postgres (durable message history) ---
+    # Unix-socket + peer auth. The service OS user (cfg.user) maps to a
+    # superuser Postgres role for this single-machine dev setup; that keeps us
+    # out of `ensureDBOwnership`'s same-name constraint so we can use a `chat`
+    # database with an arbitrarily-named OS user.
+    services.postgresql = {
+      enable = true;
+      ensureDatabases = [ "chat" ];
+      ensureUsers = [
+        {
+          name = cfg.user;
+          ensureClauses.superuser = true;
+        }
+      ];
+    };
+
     # --- Temporal dev server ---
     systemd.services.ted-temporal = {
       description = "Temporal dev server for Ted";
@@ -105,8 +128,8 @@ in {
     # --- Ted worker ---
     systemd.services.ted-worker = {
       description = "Ted Temporal worker (Claude streaming activity)";
-      after = [ "ted-temporal.service" "network.target" ];
-      requires = [ "ted-temporal.service" ];
+      after = [ "ted-temporal.service" "network.target" "postgresql.service" "redis-ted.service" ];
+      requires = [ "ted-temporal.service" "postgresql.service" "redis-ted.service" ];
       wantedBy = [ "multi-user.target" ];
       path = [ pkgs.nodejs_22 pkgs.coreutils ];
       environment = {
@@ -116,6 +139,8 @@ in {
         AWS_REGION = cfg.awsRegion;
         CLAUDE_CODE_USE_BEDROCK = "1";
         ANTHROPIC_MODEL = cfg.model;
+        REDIS_URL = "redis://127.0.0.1:6379";
+        DATABASE_URL = "postgresql:///chat?host=/run/postgresql";
       };
       serviceConfig = {
         User = cfg.user;
@@ -131,8 +156,8 @@ in {
     # --- Ted webhook ---
     systemd.services.ted-webhook = {
       description = "Ted webhook (HTTP -> Temporal signalWithStart)";
-      after = [ "ted-temporal.service" "network.target" ];
-      requires = [ "ted-temporal.service" ];
+      after = [ "ted-temporal.service" "network.target" "postgresql.service" "redis-ted.service" ];
+      requires = [ "ted-temporal.service" "postgresql.service" "redis-ted.service" ];
       wantedBy = [ "multi-user.target" ];
       path = [ pkgs.nodejs_22 pkgs.coreutils ];
       environment = {
@@ -140,6 +165,8 @@ in {
         TEMPORAL_NAMESPACE = "default";
         TASK_QUEUE = cfg.taskQueue;
         WEBHOOK_PORT = toString cfg.webhookPort;
+        REDIS_URL = "redis://127.0.0.1:6379";
+        DATABASE_URL = "postgresql:///chat?host=/run/postgresql";
       };
       serviceConfig = {
         User = cfg.user;
