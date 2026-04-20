@@ -1,5 +1,33 @@
+import Anthropic from '@anthropic-ai/sdk';
+import { heartbeat } from '@temporalio/activity';
+import { publishDelta } from './publish.js';
 import type { StreamReq } from './types.js';
 
-export async function streamClaude(_req: StreamReq): Promise<string> {
-  throw new Error('streamClaude not yet implemented');
+const client = new Anthropic({ maxRetries: 0 }); // Temporal owns retries
+
+const MODEL = 'claude-opus-4-5';
+const MAX_TOKENS = 4096;
+
+export async function streamClaude(req: StreamReq): Promise<string> {
+  const stream = client.messages.stream({
+    model: MODEL,
+    max_tokens: MAX_TOKENS,
+    messages: req.history,
+  });
+
+  for await (const event of stream) {
+    if (
+      event.type === 'content_block_delta' &&
+      event.delta.type === 'text_delta'
+    ) {
+      await publishDelta(req.sessionId, event.delta.text);
+      heartbeat();
+    }
+  }
+
+  const final = await stream.finalMessage();
+  return final.content
+    .filter((b): b is Extract<typeof b, { type: 'text' }> => b.type === 'text')
+    .map((b) => b.text)
+    .join('');
 }
