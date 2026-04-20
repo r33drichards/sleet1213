@@ -1,11 +1,17 @@
 /**
  * Thin wrapper around @modelcontextprotocol/sdk for remote HTTP MCP servers.
- * Opens a connection per call — short-lived sessions are fine for our use
- * (one-shot `tools/list` during health checks, a handful of `tools/call`
- * per Claude turn).
+ * Opens a fresh connection per call — short-lived sessions are fine for our
+ * use (one-shot `tools/list` during health checks, a handful of
+ * `tools/call` per Claude turn).
+ *
+ * Auto-negotiates transport: tries the modern Streamable HTTP first; on
+ * connection failure, falls back to the legacy SSE transport. Servers that
+ * only expose `/sse` (e.g. older deployments or the r33drichards/mcp-js V8
+ * runtime) work without the caller needing to know the wire protocol.
  */
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
+import { SSEClientTransport } from '@modelcontextprotocol/sdk/client/sse.js';
 
 export type McpTool = {
   name: string;
@@ -18,20 +24,52 @@ export type ToolCallResult = {
   isError?: boolean;
 };
 
+/** Connect via Streamable HTTP, falling back to SSE if the server rejects. */
+async function connect(url: string): Promise<Client> {
+  const parsed = new URL(url);
+  const client = new Client({ name: 'ted', version: '0.1.0' });
+  try {
+    await client.connect(new StreamableHTTPClientTransport(parsed));
+    return client;
+  } catch (err) {
+    // Streamable HTTP failed — try legacy SSE. Don't try to be clever about
+    // error-message matching; the SDK throws a handful of distinct error
+    // shapes (MCPError, TypeError on parse, fetch aborts). Any of them
+    // mean this server probably isn't Streamable-HTTP, so try SSE.
+    try {
+      await client.close();
+    } catch {
+      /* ignore */
+    }
+    const sseClient = new Client({ name: 'ted', version: '0.1.0' });
+    try {
+      await sseClient.connect(new SSEClientTransport(parsed));
+      return sseClient;
+    } catch (sseErr) {
+      // Surface the SSE error since that's the one the user is more likely
+      // to be hitting on a legacy server; mention the HTTP failure too.
+      const httpMsg = err instanceof Error ? err.message : String(err);
+      const sseMsg =
+        sseErr instanceof Error ? sseErr.message : String(sseErr);
+      throw new Error(
+        `MCP connect failed. SSE: ${sseMsg}. Streamable HTTP: ${httpMsg}`,
+      );
+    }
+  }
+}
+
 async function withClient<T>(
   url: string,
   fn: (c: Client) => Promise<T>,
 ): Promise<T> {
-  const transport = new StreamableHTTPClientTransport(new URL(url));
-  const client = new Client({ name: 'ted', version: '0.1.0' });
-  await client.connect(transport);
+  const client = await connect(url);
   try {
     return await fn(client);
   } finally {
     try {
       await client.close();
     } catch {
-      // ignore close errors
+      /* ignore */
     }
   }
 }
