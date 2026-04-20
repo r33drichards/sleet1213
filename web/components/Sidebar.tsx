@@ -127,18 +127,26 @@ export default function Sidebar() {
           </ul>
         )}
       </div>
-      <form
-        action="/api/auth/signout"
-        method="post"
-        className="mt-3 border-t border-zinc-800 pt-3"
-      >
-        <button
-          type="submit"
-          className="w-full rounded-md px-3 py-2 text-sm text-zinc-400 hover:bg-zinc-800"
+      <div className="mt-3 border-t border-zinc-800 pt-3">
+        <Link
+          href="/settings/mcp"
+          className={`block rounded-md px-3 py-2 text-sm ${
+            pathname.startsWith('/settings')
+              ? 'bg-zinc-800 text-white'
+              : 'text-zinc-400 hover:bg-zinc-800'
+          }`}
         >
-          Sign out
-        </button>
-      </form>
+          Settings
+        </Link>
+        <form action="/api/auth/signout" method="post">
+          <button
+            type="submit"
+            className="w-full rounded-md px-3 py-2 text-left text-sm text-zinc-400 hover:bg-zinc-800"
+          >
+            Sign out
+          </button>
+        </form>
+      </div>
     </aside>
   );
 }
