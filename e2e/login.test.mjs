@@ -95,6 +95,49 @@ try {
   console.log('✓ sidebar links:', sidebarLinks);
   assert.ok(sidebarLinks.some((t) => t !== '+ New chat'), 'expected a session in sidebar');
 
+  // Wait for Haiku-generated title (not equal to UUID prefix and not "Untitled chat").
+  // The header shows "Untitled chat" until the title lands.
+  const header = page.getByRole('button', { name: /.+/, exact: false }).filter({
+    has: page.locator('span'),
+  }).first();
+  let titleText = '';
+  for (let i = 0; i < 30; i++) {
+    // Prefer the actual header text inside the chat area.
+    const h = await page.locator('header button span').first().textContent();
+    titleText = (h ?? '').trim();
+    if (titleText && !/^untitled chat$/i.test(titleText)) break;
+    await page.waitForTimeout(1000);
+  }
+  console.log('✓ auto-generated title:', JSON.stringify(titleText));
+  assert.ok(titleText.length > 0, 'expected a non-empty title');
+  assert.ok(!/^untitled/i.test(titleText), 'expected non-default title');
+
+  // Rename via UI: click header, type new title, Enter.
+  await page.locator('header button').first().click();
+  const titleInput = page.locator('header input');
+  await titleInput.fill('Renamed by test');
+  await titleInput.press('Enter');
+  // Wait for the header to re-render with new title.
+  await page.waitForFunction(
+    () => {
+      const span = document.querySelector('header button span');
+      return span?.textContent?.trim() === 'Renamed by test';
+    },
+    { timeout: 10000 },
+  );
+  console.log('✓ rename committed via header');
+
+  // Reload; the PATCH should have persisted.
+  await page.reload();
+  await page.waitForFunction(
+    () => {
+      const span = document.querySelector('header button span');
+      return span?.textContent?.trim() === 'Renamed by test';
+    },
+    { timeout: 10000 },
+  );
+  console.log('✓ rename persisted after reload');
+
   // Reload and confirm history persists
   const url = page.url();
   await page.goto(url);

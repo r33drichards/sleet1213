@@ -2,7 +2,7 @@ import Anthropic from '@anthropic-ai/sdk';
 import AnthropicBedrock from '@anthropic-ai/bedrock-sdk';
 import { heartbeat } from '@temporalio/activity';
 import { publishDelta, publishTurnEnd } from './publish.js';
-import { appendMessage, touchSession } from './db.js';
+import { appendMessage, touchSession, renameSession } from './db.js';
 import type { Role, StreamReq } from './types.js';
 
 // Bedrock when CLAUDE_CODE_USE_BEDROCK is set (any truthy value), else direct Anthropic API.
@@ -63,4 +63,58 @@ export type PersistTurnReq = {
 export async function persistTurn(req: PersistTurnReq): Promise<void> {
   await appendMessage(req.sessionId, req.role, req.content, req.userId);
   await touchSession(req.sessionId);
+}
+
+const TITLE_MODEL =
+  process.env.ANTHROPIC_TITLE_MODEL ??
+  (useBedrock
+    ? 'us.anthropic.claude-haiku-4-5-20251001-v1:0'
+    : 'claude-haiku-4-5');
+
+export type GenerateTitleReq = {
+  sessionId: string;
+  userMessage: string;
+  userId: string;
+};
+
+/**
+ * Best-effort: ask Haiku for a short title based on the first user message
+ * and save it on the sessions row. Failures are swallowed; the sidebar
+ * falls back to the session id prefix until something succeeds.
+ */
+export async function generateTitle(req: GenerateTitleReq): Promise<void> {
+  try {
+    // Cast through any: Bedrock and base Anthropic SDKs diverge on union
+    // callable typing. Same pattern as streamClaude's content extraction.
+    const resp = await (client.messages.create as (args: unknown) => Promise<unknown>)({
+      model: TITLE_MODEL,
+      max_tokens: 40,
+      messages: [
+        {
+          role: 'user',
+          content:
+            'Summarise the following message as a concise 3-6 word chat ' +
+            'title. Reply with ONLY the title text, no quotes, no ' +
+            "punctuation, no leading 'Title:'.\n\n" +
+            req.userMessage,
+        },
+      ],
+    }) as { content: Array<{ type: string; text?: string }> };
+    const blocks = resp.content;
+    let title = blocks
+      .filter((b) => b.type === 'text')
+      .map((b) => b.text ?? '')
+      .join('')
+      .trim();
+    // Strip common model habits: surrounding quotes, trailing period.
+    title = title
+      .replace(/^["'`]+|["'`]+$/g, '')
+      .replace(/\.+$/, '')
+      .slice(0, 80)
+      .trim();
+    if (!title) return;
+    await renameSession(req.sessionId, req.userId, title);
+  } catch {
+    // Best-effort; ignore failures.
+  }
 }

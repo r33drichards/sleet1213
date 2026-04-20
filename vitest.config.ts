@@ -4,5 +4,6 @@ export default defineConfig({
   test: {
     testTimeout: 30_000, // Temporal test env can be slow to boot
     hookTimeout: 30_000,
+    exclude: ['node_modules/**', 'e2e/**', 'web/**', 'dist/**'],
   },
 });
