@@ -172,42 +172,42 @@ export default function McpServersClient({
   return (
     <div className="space-y-4">
       {error && (
-        <div className="rounded border border-red-300 bg-red-50 p-2 text-sm text-red-800">
+        <div className="rounded border border-red-800 bg-red-900/30 p-2 text-sm text-red-300">
           {error}
         </div>
       )}
 
       <ul className="space-y-3">
         {servers.length === 0 && (
-          <li className="text-sm text-gray-500">No MCP servers configured.</li>
+          <li className="text-sm text-zinc-400">No MCP servers configured.</li>
         )}
         {servers.map((s) =>
           editId === s.id ? (
-            <li key={s.id} className="rounded border p-4">
+            <li key={s.id} className="rounded-md border border-zinc-800 bg-zinc-900 p-4">
               <EditFields form={editForm} setForm={setEditForm} />
               <div className="mt-3 flex gap-2">
                 <button
                   onClick={() => onUpdate(s.id)}
-                  className="rounded bg-blue-600 px-3 py-1 text-sm text-white"
+                  className="rounded-md bg-emerald-600 px-3 py-1 text-sm font-medium text-white hover:bg-emerald-500"
                 >
                   Save
                 </button>
                 <button
                   onClick={() => setEditId(null)}
-                  className="rounded border px-3 py-1 text-sm"
+                  className="rounded-md border border-zinc-700 px-3 py-1 text-sm text-zinc-200 hover:bg-zinc-800"
                 >
                   Cancel
                 </button>
               </div>
             </li>
           ) : (
-            <li key={s.id} className="rounded border p-4">
+            <li key={s.id} className="rounded-md border border-zinc-800 bg-zinc-900 p-4">
               <div className="flex items-start justify-between gap-4">
                 <div className="min-w-0">
                   <div className="flex items-center gap-2">
-                    <span className="font-medium">{s.name}</span>
+                    <span className="font-medium text-zinc-100">{s.name}</span>
                     {!s.enabled && (
-                      <span className="rounded bg-gray-200 px-2 py-0.5 text-xs text-gray-700">
+                      <span className="rounded bg-zinc-800 px-2 py-0.5 text-xs text-zinc-400">
                         disabled
                       </span>
                     )}
@@ -221,8 +221,8 @@ export default function McpServersClient({
                       enabled={s.enabled}
                     />
                   </div>
-                  <div className="truncate text-sm text-gray-600">{s.url}</div>
-                  <div className="mt-1 text-xs text-gray-500">
+                  <div className="truncate text-sm text-zinc-400">{s.url}</div>
+                  <div className="mt-1 text-xs text-zinc-500">
                     {s.allowed_tools.length > 0
                       ? `tools: ${s.allowed_tools.join(', ')}`
                       : 'all tools allowed'}
@@ -234,19 +234,19 @@ export default function McpServersClient({
                 <div className="flex shrink-0 gap-2">
                   <button
                     onClick={() => onToggle(s)}
-                    className="rounded border px-2 py-1 text-xs"
+                    className="rounded-md border border-zinc-700 px-2 py-1 text-xs text-zinc-200 hover:bg-zinc-800"
                   >
                     {s.enabled ? 'Disable' : 'Enable'}
                   </button>
                   <button
                     onClick={() => startEdit(s)}
-                    className="rounded border px-2 py-1 text-xs"
+                    className="rounded-md border border-zinc-700 px-2 py-1 text-xs text-zinc-200 hover:bg-zinc-800"
                   >
                     Edit
                   </button>
                   <button
                     onClick={() => onDelete(s.id)}
-                    className="rounded border border-red-300 px-2 py-1 text-xs text-red-700"
+                    className="rounded-md border border-red-800 px-2 py-1 text-xs text-red-400 hover:bg-red-900/30"
                   >
                     Delete
                   </button>
@@ -258,12 +258,15 @@ export default function McpServersClient({
       </ul>
 
       {adding ? (
-        <form onSubmit={onCreate} className="rounded border p-4 space-y-3">
+        <form
+          onSubmit={onCreate}
+          className="space-y-3 rounded-md border border-zinc-800 bg-zinc-900 p-4"
+        >
           <EditFields form={form} setForm={setForm} />
           <div className="flex gap-2">
             <button
               type="submit"
-              className="rounded bg-blue-600 px-3 py-1 text-sm text-white"
+              className="rounded-md bg-emerald-600 px-3 py-1 text-sm font-medium text-white hover:bg-emerald-500"
             >
               Add server
             </button>
@@ -273,7 +276,7 @@ export default function McpServersClient({
                 setAdding(false);
                 setForm(EMPTY);
               }}
-              className="rounded border px-3 py-1 text-sm"
+              className="rounded-md border border-zinc-700 px-3 py-1 text-sm text-zinc-200 hover:bg-zinc-800"
             >
               Cancel
             </button>
@@ -298,44 +301,48 @@ function EditFields({
   form: FormState;
   setForm: (f: FormState) => void;
 }) {
+  const input =
+    'mt-1 w-full rounded-md border border-zinc-700 bg-zinc-800 px-2 py-1 text-sm text-zinc-100 outline-none placeholder:text-zinc-500 focus:border-emerald-500';
+  const labelText = 'block text-zinc-300';
   return (
     <div className="space-y-2">
       <label className="block text-sm">
-        <span className="block text-gray-700">Name</span>
+        <span className={labelText}>Name</span>
         <input
           value={form.name}
           onChange={(e) => setForm({ ...form, name: e.target.value })}
-          className="mt-1 w-full rounded border px-2 py-1 text-sm"
+          className={input}
           placeholder="github"
           required
         />
       </label>
       <label className="block text-sm">
-        <span className="block text-gray-700">URL</span>
+        <span className={labelText}>URL</span>
         <input
           value={form.url}
           onChange={(e) => setForm({ ...form, url: e.target.value })}
-          className="mt-1 w-full rounded border px-2 py-1 text-sm"
+          className={input}
           placeholder="https://example.com/mcp"
           required
         />
       </label>
       <label className="block text-sm">
-        <span className="block text-gray-700">
+        <span className={labelText}>
           Allowed tools (comma-separated, leave blank for all)
         </span>
         <input
           value={form.allowedTools}
           onChange={(e) => setForm({ ...form, allowedTools: e.target.value })}
-          className="mt-1 w-full rounded border px-2 py-1 text-sm"
+          className={input}
           placeholder="create_issue, search_repos"
         />
       </label>
-      <label className="flex items-center gap-2 text-sm">
+      <label className="flex items-center gap-2 text-sm text-zinc-300">
         <input
           type="checkbox"
           checked={form.enabled}
           onChange={(e) => setForm({ ...form, enabled: e.target.checked })}
+          className="accent-emerald-500"
         />
         Enabled
       </label>
