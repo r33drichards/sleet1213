@@ -83,7 +83,22 @@ in {
     webPort = lib.mkOption {
       type = lib.types.port;
       default = 3000;
-      description = "Port the Next.js UI listens on (bind is always 127.0.0.1).";
+      description = "Port the Next.js UI listens on.";
+    };
+
+    webBindAddress = lib.mkOption {
+      type = lib.types.str;
+      default = "127.0.0.1";
+      description = ''
+        Bind address for the web UI. Use 0.0.0.0 to expose it over the
+        Tailscale interface (combined with firewall.trustedInterfaces).
+      '';
+    };
+
+    keycloakBindAddress = lib.mkOption {
+      type = lib.types.str;
+      default = "127.0.0.1";
+      description = "Bind address for Keycloak HTTP.";
     };
 
     webBaseUrl = lib.mkOption {
@@ -225,10 +240,9 @@ in {
         useSSL = false;
       };
       settings = {
-        hostname = "127.0.0.1";
         hostname-strict = false;
         http-enabled = true;
-        http-host = "127.0.0.1";
+        http-host = cfg.keycloakBindAddress;
         http-port = cfg.keycloakPort;
         proxy-headers = "xforwarded";
       };
@@ -318,7 +332,7 @@ in {
         WorkingDirectory = "${cfg.source}/web";
         EnvironmentFile = lib.mkIf (cfg.webEnvironmentFile != null) cfg.webEnvironmentFile;
         # next-start directly to avoid npm+sh dependency; Node is enough.
-        ExecStart = "${pkgs.nodejs_22}/bin/node ${cfg.source}/web/node_modules/next/dist/bin/next start -p ${toString cfg.webPort} -H 127.0.0.1";
+        ExecStart = "${pkgs.nodejs_22}/bin/node ${cfg.source}/web/node_modules/next/dist/bin/next start -p ${toString cfg.webPort} -H ${cfg.webBindAddress}";
         Restart = "always";
         RestartSec = 3;
       };
