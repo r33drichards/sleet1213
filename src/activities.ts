@@ -6,7 +6,6 @@ import {
   appendMessage,
   touchSession,
   renameSession,
-  listEnabledMcpServers,
   loadMemoryContext,
 } from './db.js';
 import { createMemoryMcpServer } from './memory-mcp.js';
@@ -15,71 +14,34 @@ import type { Role, StreamReq } from './types.js';
 const MODEL = process.env.ANTHROPIC_MODEL ?? 'claude-sonnet-4-5';
 
 /**
- * Build MCP server configs from the user's enabled servers in the DB.
- * Returns a record suitable for the Agent SDK's `mcpServers` option.
- */
-async function buildMcpServers(userId: string): Promise<Record<string, any>> {
-  const servers = await listEnabledMcpServers(userId);
-  const config: Record<string, any> = {};
-  for (const s of servers) {
-    if (s.transport === 'stdio' && s.command) {
-      config[s.name] = { command: s.command, args: s.args ?? [] };
-    } else if (s.url) {
-      // Detect SSE vs HTTP based on URL patterns, default to HTTP
-      config[s.name] = { type: 'http', url: s.url };
-    }
-  }
-  return config;
-}
-
-/**
  * Stream an assistant turn using the Claude Agent SDK.
  *
- * The SDK handles the full agent loop: tool execution, MCP dispatch,
- * skills, subagents, etc. We stream events to Redis for the IRC bridge
- * and persist the final text.
+ * Uses SDK session `resume` for multi-turn context — each turn resumes
+ * the previous session so the agent has full conversation history without
+ * us passing it manually.
+ *
+ * Returns { text, sdkSessionId } so the workflow can track the session.
  */
-export async function streamClaude(req: StreamReq): Promise<string> {
-  // Load user memories for system prompt injection
+export async function streamClaude(req: StreamReq): Promise<{ text: string; sdkSessionId: string }> {
   const memoryCtx = await loadMemoryContext(req.userId);
-  const userMcpServers = await buildMcpServers(req.userId);
-
-  // Build the prompt from history
-  const historyLines = req.history.map(
-    (m) => `${m.role === 'user' ? 'User' : 'Assistant'}: ${m.content}`,
-  );
-  // The last user message is the prompt; prior history goes into context
-  const lastUserMsg = req.history.filter((m) => m.role === 'user').pop();
-  const prompt = lastUserMsg?.content ?? '';
+  const memoryServer = createMemoryMcpServer(req.userId);
 
   const systemParts: string[] = [
     'You have full read/write access to .claude/skills/. ' +
     'You can create, edit, and delete skill files there without asking for permission. ' +
     'Just do it directly using Write or Edit tools.',
   ];
-  if (req.systemPrompt) systemParts.push(req.systemPrompt);
   if (memoryCtx) systemParts.push(memoryCtx);
-  // Include prior conversation as context
-  if (req.history.length > 1) {
-    systemParts.push(
-      '[Conversation history]\n' +
-      req.history.slice(0, -1).map(
-        (m) => `${m.role === 'user' ? 'User' : 'Assistant'}: ${m.content}`,
-      ).join('\n'),
-    );
-  }
 
-  const systemPrompt = systemParts.join('\n\n') || undefined;
-
-  // Create in-process memory MCP server for this user
-  const memoryServer = createMemoryMcpServer(req.userId);
+  const lastUserMsg = req.history.filter((m) => m.role === 'user').pop();
+  const prompt = lastUserMsg?.content ?? '';
 
   const options: Options = {
     model: MODEL,
     cwd: '/app',
     additionalDirectories: ['/app/.claude/skills'],
     ...(process.env.CLAUDE_CODE_PATH ? { pathToClaudeCodeExecutable: process.env.CLAUDE_CODE_PATH } : {}),
-    systemPrompt,
+    systemPrompt: systemParts.join('\n\n'),
     allowedTools: [
       'Read', 'Write', 'Edit',
       'Glob', 'Grep',
@@ -92,22 +54,28 @@ export async function streamClaude(req: StreamReq): Promise<string> {
     allowDangerouslySkipPermissions: true,
     settingSources: ['project'],
     includePartialMessages: true,
-    persistSession: false,
     mcpServers: {
-      ...userMcpServers,
       memory: memoryServer,
     },
+    // Resume previous SDK session for multi-turn context
+    ...(req.sdkSessionId ? { resume: req.sdkSessionId } : {}),
   };
 
   let lastAssistantText = '';
+  let sdkSessionId = req.sdkSessionId ?? '';
 
   try {
     for await (const message of query({ prompt, options })) {
       heartbeat();
 
-      // Partial streaming events (token-by-token)
-      if (message.type === 'stream_event' && message.event) {
-        const ev = message.event as any;
+      // Capture session ID from init message
+      if (message.type === 'system' && (message as any).subtype === 'init') {
+        sdkSessionId = (message as any).session_id ?? sdkSessionId;
+      }
+
+      // Streaming events (token by token)
+      if (message.type === 'stream_event' && (message as any).event) {
+        const ev = (message as any).event;
         if (ev.type === 'content_block_delta') {
           if (ev.delta?.type === 'text_delta' && ev.delta.text) {
             await publishDelta(req.sessionId, ev.delta.text);
@@ -119,20 +87,20 @@ export async function streamClaude(req: StreamReq): Promise<string> {
         }
       }
 
-      // Complete assistant messages (for extracting final text)
+      // Complete assistant messages
       if (message.type === 'assistant') {
         const msg = (message as any).message;
         if (msg?.content) {
-          const textParts = msg.content
-            .filter((b: any) => b.type === 'text')
-            .map((b: any) => b.text ?? '');
+          const textParts = (msg.content as any[])
+            .filter((b) => b.type === 'text')
+            .map((b) => b.text ?? '');
           if (textParts.length > 0) {
             lastAssistantText = textParts.join('');
           }
         }
       }
 
-      // Result message — agent finished
+      // Result — agent finished this turn
       if (message.type === 'result') {
         const result = (message as any).result;
         if (typeof result === 'string' && result) {
@@ -144,7 +112,7 @@ export async function streamClaude(req: StreamReq): Promise<string> {
     await publishTurnEnd(req.sessionId);
   }
 
-  return lastAssistantText;
+  return { text: lastAssistantText, sdkSessionId };
 }
 
 export type PersistTurnReq = {
@@ -167,9 +135,6 @@ export type GenerateTitleReq = {
   userId: string;
 };
 
-/**
- * Generate a short title for a session using the Agent SDK.
- */
 export async function generateTitle(req: GenerateTitleReq): Promise<void> {
   try {
     let title = '';
@@ -184,6 +149,7 @@ export async function generateTitle(req: GenerateTitleReq): Promise<void> {
         tools: [],
         permissionMode: 'dontAsk',
         persistSession: false,
+        ...(process.env.CLAUDE_CODE_PATH ? { pathToClaudeCodeExecutable: process.env.CLAUDE_CODE_PATH } : {}),
       },
     })) {
       if (message.type === 'result') {
@@ -199,6 +165,6 @@ export async function generateTitle(req: GenerateTitleReq): Promise<void> {
     if (!title) return;
     await renameSession(req.sessionId, req.userId, title);
   } catch {
-    // Best-effort; ignore failures.
+    // Best-effort
   }
 }

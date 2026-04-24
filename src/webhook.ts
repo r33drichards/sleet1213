@@ -3,7 +3,7 @@ import { streamSSE } from 'hono/streaming';
 import { serve } from '@hono/node-server';
 import { Client, Connection } from '@temporalio/client';
 import { chatSession } from './workflows.js';
-import { userMessageSignal } from './signals.js';
+import { userMessageSignal, closeSignal } from './signals.js';
 import {
   ensureSchema,
   getMessages,
@@ -13,53 +13,17 @@ import {
   renameSession,
   setSessionArchived,
   deleteSession,
-  setMemory,
-  type MemoryTier,
 } from './db.js';
 import { subscribeDeltas } from './publish.js';
-import { closeSignal } from './signals.js';
-
-export type SignalWithStartFn = (
-  workflow: typeof chatSession,
-  options: {
-    workflowId: string;
-    taskQueue: string;
-    args: [string, ...unknown[]];
-    signal: typeof userMessageSignal;
-    signalArgs: [string];
-  },
-) => Promise<{ workflowId: string }>;
-
-export type SignalCloseFn = (workflowId: string) => Promise<void>;
-
-export type AppDeps = {
-  signalWithStart: SignalWithStartFn;
-  taskQueue: string;
-  getMessages?: typeof getMessages;
-  getSessions?: typeof getSessions;
-  createSession?: typeof createSession;
-  sessionBelongsTo?: typeof sessionBelongsTo;
-  renameSession?: typeof renameSession;
-  setSessionArchived?: typeof setSessionArchived;
-  deleteSession?: typeof deleteSession;
-  subscribeDeltas?: typeof subscribeDeltas;
-  signalClose?: SignalCloseFn;
-};
 
 type Vars = { userId: string };
 
-export function makeApp(deps: AppDeps) {
+export function makeApp(deps: {
+  signalWithStart: (wf: typeof chatSession, opts: any) => Promise<any>;
+  taskQueue: string;
+  signalClose?: (workflowId: string) => Promise<void>;
+}) {
   const app = new Hono<{ Variables: Vars }>();
-  const readMessages = deps.getMessages ?? getMessages;
-  const readSessions = deps.getSessions ?? getSessions;
-  const recordSession = deps.createSession ?? createSession;
-  const ownsSession = deps.sessionBelongsTo ?? sessionBelongsTo;
-  const updateSessionTitle = deps.renameSession ?? renameSession;
-  const updateSessionArchived = deps.setSessionArchived ?? setSessionArchived;
-  const dropSession = deps.deleteSession ?? deleteSession;
-  const closeWorkflow: SignalCloseFn =
-    deps.signalClose ?? (async () => undefined);
-  const subscribe = deps.subscribeDeltas ?? subscribeDeltas;
 
   app.use('*', async (c, next) => {
     const userId = c.req.header('X-User-ID');
@@ -83,16 +47,16 @@ export function makeApp(deps: AppDeps) {
       return c.json({ error: 'sessionId and msg required' }, 400);
     }
 
-    const exists = await ownsSession(body.sessionId, userId);
+    const exists = await sessionBelongsTo(body.sessionId, userId);
     if (!exists) {
-      await recordSession(userId, body.sessionId);
-      const nowOwned = await ownsSession(body.sessionId, userId);
+      await createSession(userId, body.sessionId);
+      const nowOwned = await sessionBelongsTo(body.sessionId, userId);
       if (!nowOwned) {
         return c.json({ error: 'session belongs to another user' }, 403);
       }
     }
 
-    const handle = await deps.signalWithStart(chatSession, {
+    await deps.signalWithStart(chatSession, {
       workflowId: `chat:${body.sessionId}`,
       taskQueue: deps.taskQueue,
       args: [body.sessionId, [], userId],
@@ -100,22 +64,22 @@ export function makeApp(deps: AppDeps) {
       signalArgs: [body.msg],
     });
 
-    return c.json({ ok: true, workflowId: handle.workflowId });
+    return c.json({ ok: true });
   });
 
   app.get('/sessions', async (c) => {
     const userId = c.get('userId');
-    const sessions = await readSessions(userId);
+    const sessions = await getSessions(userId);
     return c.json({ sessions });
   });
 
   app.get('/sessions/:sessionId/messages', async (c) => {
     const userId = c.get('userId');
     const sessionId = c.req.param('sessionId');
-    if (!(await ownsSession(sessionId, userId))) {
+    if (!(await sessionBelongsTo(sessionId, userId))) {
       return c.json({ error: 'not found' }, 404);
     }
-    const messages = await readMessages(sessionId, userId);
+    const messages = await getMessages(sessionId, userId);
     return c.json({ sessionId, messages });
   });
 
@@ -134,15 +98,11 @@ export function makeApp(deps: AppDeps) {
     }
 
     if (hasTitle) {
-      const ok = await updateSessionTitle(sessionId, userId, body.title as string);
+      const ok = await renameSession(sessionId, userId, body.title as string);
       if (!ok) return c.json({ error: 'not found' }, 404);
     }
     if (hasArchived) {
-      const ok = await updateSessionArchived(
-        sessionId,
-        userId,
-        body.archived as boolean,
-      );
+      const ok = await setSessionArchived(sessionId, userId, body.archived as boolean);
       if (!ok) return c.json({ error: 'not found' }, 404);
     }
     return c.json({ ok: true });
@@ -151,37 +111,21 @@ export function makeApp(deps: AppDeps) {
   app.delete('/sessions/:sessionId', async (c) => {
     const userId = c.get('userId');
     const sessionId = c.req.param('sessionId');
-    if (!(await ownsSession(sessionId, userId))) {
+    if (!(await sessionBelongsTo(sessionId, userId))) {
       return c.json({ error: 'not found' }, 404);
     }
     try {
-      await closeWorkflow(`chat:${sessionId}`);
-    } catch {
-      /* ignore */
-    }
-    const ok = await dropSession(sessionId, userId);
+      await deps.signalClose?.(`chat:${sessionId}`);
+    } catch { /* ignore */ }
+    const ok = await deleteSession(sessionId, userId);
     if (!ok) return c.json({ error: 'not found' }, 404);
     return c.json({ ok: true });
-  });
-
-  app.put('/memories/:key', async (c) => {
-    const userId = c.get('userId');
-    const key = c.req.param('key');
-    const body = await c.req.json().catch(() => null);
-    if (!body || typeof body.content !== 'string' || !body.content) {
-      return c.json({ error: 'content required' }, 400);
-    }
-    const tier: MemoryTier = ['working', 'short_term', 'long_term'].includes(body.tier)
-      ? body.tier
-      : 'working';
-    const row = await setMemory(userId, tier, key, body.content);
-    return c.json({ memory: row });
   });
 
   app.get('/sessions/:sessionId/stream', async (c) => {
     const userId = c.get('userId');
     const sessionId = c.req.param('sessionId');
-    if (!(await ownsSession(sessionId, userId))) {
+    if (!(await sessionBelongsTo(sessionId, userId))) {
       return c.json({ error: 'not found' }, 404);
     }
     const lastEventId = c.req.header('Last-Event-ID');
@@ -194,7 +138,7 @@ export function makeApp(deps: AppDeps) {
       c.req.raw.signal?.addEventListener('abort', onClose);
 
       try {
-        for await (const { id, event } of subscribe(sessionId, from, abort.signal)) {
+        for await (const { id, event } of subscribeDeltas(sessionId, from, abort.signal)) {
           await sse.writeSSE({ id, data: JSON.stringify(event) });
         }
       } finally {
@@ -219,14 +163,12 @@ async function main() {
   const client = new Client({ connection, namespace });
 
   const app = makeApp({
-    signalWithStart: (wf, opts) => client.workflow.signalWithStart(wf, opts as any) as any,
+    signalWithStart: (wf, opts) => client.workflow.signalWithStart(wf, opts) as any,
     taskQueue,
     signalClose: async (workflowId) => {
       try {
         await client.workflow.getHandle(workflowId).signal(closeSignal);
-      } catch {
-        /* workflow may be absent or already done; best-effort */
-      }
+      } catch { /* ignore */ }
     },
   });
 
