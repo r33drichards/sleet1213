@@ -1,3 +1,4 @@
+// @ts-ignore — no type declarations for irc-framework
 import IRC from 'irc-framework';
 
 /**
