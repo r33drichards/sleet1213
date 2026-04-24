@@ -295,7 +295,10 @@ export function makeApp(deps: AppDeps) {
     const row = rows.find((r) => r.id === id);
     if (!row) return c.json({ error: 'not found' }, 404);
     try {
-      const tools = await mcp.listTools(row.url);
+      const connectOpts: mcp.ConnectOpts = row.transport === 'stdio' && row.command
+        ? { transport: 'stdio', command: row.command, args: row.args ?? [] }
+        : { transport: 'http', url: row.url! };
+      const tools = await mcp.listTools(connectOpts);
       return c.json({
         connected: true,
         tools: tools.map((t) => ({

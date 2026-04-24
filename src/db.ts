@@ -52,6 +52,10 @@ CREATE TABLE IF NOT EXISTS mcp_servers (
 );
 CREATE INDEX IF NOT EXISTS mcp_servers_user_enabled_idx
   ON mcp_servers (user_id) WHERE enabled;
+ALTER TABLE mcp_servers ADD COLUMN IF NOT EXISTS transport TEXT NOT NULL DEFAULT 'http';
+ALTER TABLE mcp_servers ADD COLUMN IF NOT EXISTS command TEXT;
+ALTER TABLE mcp_servers ADD COLUMN IF NOT EXISTS args JSONB NOT NULL DEFAULT '[]'::jsonb;
+ALTER TABLE mcp_servers ALTER COLUMN url DROP NOT NULL;
 
 CREATE TABLE IF NOT EXISTS memories (
   id         UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -257,7 +261,10 @@ export type McpServerRow = {
   id: string;
   user_id: string;
   name: string;
-  url: string;
+  url: string | null;
+  transport: 'http' | 'stdio';
+  command: string | null;
+  args: string[];
   allowed_tools: string[];
   enabled: boolean;
   created_at: string;
@@ -272,7 +279,7 @@ export class McpNameTakenError extends Error {
 }
 
 const MCP_COLS =
-  'id, user_id, name, url, allowed_tools, enabled, created_at, updated_at';
+  'id, user_id, name, url, transport, command, args, allowed_tools, enabled, created_at, updated_at';
 
 export async function listMcpServers(userId: string): Promise<McpServerRow[]> {
   const { rows } = await getPool().query<McpServerRow>(
@@ -298,7 +305,10 @@ export async function listEnabledMcpServers(
 
 export type CreateMcpServerInput = {
   name: string;
-  url: string;
+  url?: string;
+  transport?: 'http' | 'stdio';
+  command?: string;
+  args?: string[];
   allowed_tools?: string[];
   enabled?: boolean;
 };
@@ -307,15 +317,19 @@ export async function createMcpServer(
   userId: string,
   input: CreateMcpServerInput,
 ): Promise<McpServerRow> {
+  const transport = input.transport ?? 'http';
   try {
     const { rows } = await getPool().query<McpServerRow>(
-      `INSERT INTO mcp_servers (user_id, name, url, allowed_tools, enabled)
-       VALUES ($1, $2, $3, $4::jsonb, $5)
+      `INSERT INTO mcp_servers (user_id, name, url, transport, command, args, allowed_tools, enabled)
+       VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7::jsonb, $8)
        RETURNING ${MCP_COLS}`,
       [
         userId,
         input.name,
-        input.url,
+        input.url ?? null,
+        transport,
+        input.command ?? null,
+        JSON.stringify(input.args ?? []),
         JSON.stringify(input.allowed_tools ?? []),
         input.enabled ?? true,
       ],

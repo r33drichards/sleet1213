@@ -12,6 +12,7 @@
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import { SSEClientTransport } from '@modelcontextprotocol/sdk/client/sse.js';
+import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 
 export type McpTool = {
   name: string;
@@ -25,7 +26,7 @@ export type ToolCallResult = {
 };
 
 /** Connect via Streamable HTTP, falling back to SSE if the server rejects. */
-async function connect(url: string): Promise<Client> {
+async function connectHttp(url: string): Promise<Client> {
   const parsed = new URL(url);
   const client = new Client({ name: 'ted', version: '0.1.0' });
   try {
@@ -58,11 +59,25 @@ async function connect(url: string): Promise<Client> {
   }
 }
 
+/** Connect via stdio by spawning a child process. */
+async function connectStdio(command: string, args: string[]): Promise<Client> {
+  const client = new Client({ name: 'ted', version: '0.1.0' });
+  const transport = new StdioClientTransport({ command, args });
+  await client.connect(transport);
+  return client;
+}
+
+export type ConnectOpts =
+  | { transport: 'http'; url: string }
+  | { transport: 'stdio'; command: string; args: string[] };
+
 async function withClient<T>(
-  url: string,
+  opts: ConnectOpts,
   fn: (c: Client) => Promise<T>,
 ): Promise<T> {
-  const client = await connect(url);
+  const client = opts.transport === 'stdio'
+    ? await connectStdio(opts.command, opts.args)
+    : await connectHttp(opts.url);
   try {
     return await fn(client);
   } finally {
@@ -74,19 +89,19 @@ async function withClient<T>(
   }
 }
 
-export async function listTools(url: string): Promise<McpTool[]> {
-  return withClient(url, async (c) => {
+export async function listTools(opts: ConnectOpts): Promise<McpTool[]> {
+  return withClient(opts, async (c) => {
     const result = await c.listTools();
     return result.tools as McpTool[];
   });
 }
 
 export async function callTool(
-  url: string,
+  opts: ConnectOpts,
   name: string,
   args: Record<string, unknown>,
 ): Promise<ToolCallResult> {
-  return withClient(url, async (c) => {
+  return withClient(opts, async (c) => {
     const result = await c.callTool({ name, arguments: args });
     return result as ToolCallResult;
   });

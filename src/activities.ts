@@ -67,6 +67,13 @@ type ClaudeTool = {
   input_schema: Record<string, unknown>;
 };
 
+function serverConnectOpts(s: McpServerRow): mcp.ConnectOpts {
+  if (s.transport === 'stdio' && s.command) {
+    return { transport: 'stdio', command: s.command, args: s.args ?? [] };
+  }
+  return { transport: 'http', url: s.url! };
+}
+
 /**
  * Load tool definitions from every enabled MCP server for this user and
  * return them in the shape Claude's API expects. Tools an `allowed_tools`
@@ -88,7 +95,7 @@ async function gatherMcpTools(userId: string): Promise<{
   await Promise.all(
     servers.map(async (s) => {
       try {
-        const remote = await mcp.listTools(s.url);
+        const remote = await mcp.listTools(serverConnectOpts(s));
         for (const t of remote) {
           if (s.allowed_tools.length > 0 && !s.allowed_tools.includes(t.name)) {
             continue;
@@ -122,8 +129,9 @@ const BUILTIN_TOOLS: ClaudeTool[] = [
   {
     name: 'ted__add_mcp_server',
     description:
-      'Add a remote MCP server so its tools become available to you. ' +
-      'Provide a short name and the HTTP(S) URL of the server. ' +
+      'Add an MCP server so its tools become available to you. ' +
+      'For HTTP servers, provide a url. ' +
+      'For stdio servers (local commands), provide command and args. ' +
       'After adding, the server\'s tools are usable immediately.',
     input_schema: {
       type: 'object',
@@ -131,14 +139,23 @@ const BUILTIN_TOOLS: ClaudeTool[] = [
         name: {
           type: 'string',
           description:
-            'Short identifier for this server (e.g. "weather", "github")',
+            'Short identifier for this server (e.g. "weather", "runno")',
         },
         url: {
           type: 'string',
-          description: 'HTTP(S) URL of the MCP server endpoint',
+          description: 'HTTP(S) URL (for HTTP transport)',
+        },
+        command: {
+          type: 'string',
+          description: 'Command to run (for stdio transport, e.g. "npx")',
+        },
+        args: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'Command arguments (for stdio transport, e.g. ["@runno/mcp"])',
         },
       },
-      required: ['name', 'url'],
+      required: ['name'],
     },
   },
   {
@@ -262,16 +279,34 @@ async function handleBuiltinTool(
   switch (name) {
     case 'ted__add_mcp_server': {
       const sName = String(input.name ?? '').trim();
-      const sUrl = String(input.url ?? '').trim();
       if (!sName) return { content: 'error: name is required', toolsChanged: false };
-      if (!sUrl) return { content: 'error: url is required', toolsChanged: false };
-      try {
-        new URL(sUrl); // validate
-      } catch {
-        return { content: `error: invalid url: ${sUrl}`, toolsChanged: false };
+
+      const sUrl = input.url ? String(input.url).trim() : undefined;
+      const sCmd = input.command ? String(input.command).trim() : undefined;
+      const sArgs = Array.isArray(input.args)
+        ? input.args.map(String)
+        : undefined;
+
+      if (!sUrl && !sCmd) {
+        return { content: 'error: provide either url (HTTP) or command (stdio)', toolsChanged: false };
       }
+
+      const transport: 'http' | 'stdio' = sCmd ? 'stdio' : 'http';
+
+      if (sUrl) {
+        try { new URL(sUrl); } catch {
+          return { content: `error: invalid url: ${sUrl}`, toolsChanged: false };
+        }
+      }
+
       try {
-        await createMcpServer(userId, { name: sName, url: sUrl });
+        await createMcpServer(userId, {
+          name: sName,
+          url: sUrl,
+          transport,
+          command: sCmd,
+          args: sArgs,
+        });
       } catch (err) {
         if (err instanceof McpNameTakenError) {
           return {
@@ -281,20 +316,26 @@ async function handleBuiltinTool(
         }
         throw err;
       }
+
+      const connectOpts: mcp.ConnectOpts = sCmd
+        ? { transport: 'stdio', command: sCmd, args: sArgs ?? [] }
+        : { transport: 'http', url: sUrl! };
+      const label = sCmd ? `${sCmd} ${(sArgs ?? []).join(' ')}` : sUrl!;
+
       // Verify connectivity and list available tools.
       try {
-        const tools = await mcp.listTools(sUrl);
+        const tools = await mcp.listTools(connectOpts);
         const names = tools.map((t) => t.name).join(', ');
         return {
           content:
-            `Added MCP server "${sName}" (${sUrl}). ` +
+            `Added MCP server "${sName}" (${transport}: ${label}). ` +
             `${tools.length} tool(s) available: ${names}`,
           toolsChanged: true,
         };
       } catch (err) {
         return {
           content:
-            `Added MCP server "${sName}" (${sUrl}), but failed to connect: ` +
+            `Added MCP server "${sName}" (${transport}: ${label}), but failed to connect: ` +
             (err instanceof Error ? err.message : String(err)) +
             '. The server is saved and will be retried on the next turn.',
           toolsChanged: true,
@@ -532,7 +573,7 @@ export async function streamClaude(req: StreamReq): Promise<string> {
         try {
           heartbeat();
           const res = await mcp.callTool(
-            lookup.server.url,
+            serverConnectOpts(lookup.server),
             lookup.original,
             (tu.input as Record<string, unknown>) ?? {},
           );
