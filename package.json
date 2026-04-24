@@ -17,7 +17,7 @@
   },
   "dependencies": {
     "@anthropic-ai/bedrock-sdk": "^0.28.1",
-    "@anthropic-ai/sdk": "^0.30.0",
+    "@anthropic-ai/sdk": "^0.91.0",
     "@hono/node-server": "^1.13.0",
     "@modelcontextprotocol/sdk": "^1.29.0",
     "@temporalio/activity": "^1.11.0",
