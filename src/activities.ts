@@ -1,7 +1,7 @@
 import Anthropic from '@anthropic-ai/sdk';
 import AnthropicBedrock from '@anthropic-ai/bedrock-sdk';
 import { heartbeat } from '@temporalio/activity';
-import { publishDelta, publishTurnEnd } from './publish.js';
+import { publishDelta, publishThinking, publishToolCall, publishTurnEnd } from './publish.js';
 import {
   appendMessage,
   touchSession,
@@ -425,12 +425,12 @@ async function runOneStream(
       delta?: { type: string; text?: string; thinking?: string };
     };
     if (ev.type === 'content_block_start' && ev.content_block?.type === 'tool_use') {
-      await publishDelta(sessionId, `\n[calling ${ev.content_block.name}]\n`);
+      await publishToolCall(sessionId, ev.content_block.name ?? 'unknown');
     } else if (ev.type === 'content_block_delta') {
       if (ev.delta?.type === 'text_delta' && typeof ev.delta.text === 'string') {
         await publishDelta(sessionId, ev.delta.text);
       } else if (ev.delta?.type === 'thinking_delta' && typeof ev.delta.thinking === 'string') {
-        await publishDelta(sessionId, ev.delta.thinking);
+        await publishThinking(sessionId, ev.delta.thinking);
       }
     }
     heartbeat();

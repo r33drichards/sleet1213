@@ -10,6 +10,8 @@ function streamKey(sessionId: string): string {
 
 export type StreamEvent =
   | { type: 'delta'; text: string }
+  | { type: 'thinking'; text: string }
+  | { type: 'tool_call'; name: string }
   | { type: 'turn_end' };
 
 /**
@@ -20,6 +22,34 @@ export type StreamEvent =
 export async function publishDelta(sessionId: string, text: string): Promise<void> {
   const r = getRedis();
   const event: StreamEvent = { type: 'delta', text };
+  await r.xadd(
+    streamKey(sessionId),
+    'MAXLEN',
+    '~',
+    String(STREAM_MAXLEN),
+    '*',
+    'data',
+    JSON.stringify(event),
+  );
+}
+
+export async function publishThinking(sessionId: string, text: string): Promise<void> {
+  const r = getRedis();
+  const event: StreamEvent = { type: 'thinking', text };
+  await r.xadd(
+    streamKey(sessionId),
+    'MAXLEN',
+    '~',
+    String(STREAM_MAXLEN),
+    '*',
+    'data',
+    JSON.stringify(event),
+  );
+}
+
+export async function publishToolCall(sessionId: string, name: string): Promise<void> {
+  const r = getRedis();
+  const event: StreamEvent = { type: 'tool_call', name };
   await r.xadd(
     streamKey(sessionId),
     'MAXLEN',

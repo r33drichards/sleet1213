@@ -152,7 +152,7 @@ async function streamToIrc(
 
   let pending = '';
   for await (const data of readSse(url, headers, signal)) {
-    let event: { type: string; text?: string };
+    let event: { type: string; text?: string; name?: string };
     try {
       event = JSON.parse(data);
     } catch {
@@ -160,6 +160,10 @@ async function streamToIrc(
     }
     if (event.type === 'delta' && typeof event.text === 'string') {
       pending += event.text;
+    } else if (event.type === 'thinking') {
+      // Skip thinking tokens — don't send to IRC
+    } else if (event.type === 'tool_call' && event.name) {
+      sendPrivmsg(`[using ${event.name}]`);
     } else if (event.type === 'turn_end') {
       const msg = pending;
       pending = '';
