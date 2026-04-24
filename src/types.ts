@@ -9,4 +9,5 @@ export type StreamReq = {
   sessionId: string;
   history: Msg[];
   userId: string;
+  systemPrompt?: string;
 };

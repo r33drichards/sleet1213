@@ -144,7 +144,8 @@ export function makeApp(deps: AppDeps) {
       // First message for this session — record ownership. If another user
       // already owns this id, the INSERT is a no-op and the next ownsSession
       // check fails.
-      await recordSession(userId, body.sessionId, null);
+      const sp = typeof body.systemPrompt === 'string' ? body.systemPrompt : null;
+      await recordSession(userId, body.sessionId, null, sp);
       const nowOwned = await ownsSession(body.sessionId, userId);
       if (!nowOwned) {
         return c.json({ error: 'session belongs to another user' }, 403);

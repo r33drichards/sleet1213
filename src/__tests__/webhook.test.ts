@@ -56,7 +56,7 @@ describe('webhook /message', () => {
     });
 
     expect(res.status).toBe(200);
-    expect(createSession).toHaveBeenCalledWith(USER, 'abc', null);
+    expect(createSession).toHaveBeenCalledWith(USER, 'abc', null, null);
     expect(signalWithStart).toHaveBeenCalledTimes(1);
     const call = signalWithStart.mock.calls[0];
     expect(call[1]).toMatchObject({

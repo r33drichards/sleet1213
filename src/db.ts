@@ -37,6 +37,7 @@ CREATE TABLE IF NOT EXISTS sessions (
 CREATE INDEX IF NOT EXISTS sessions_user_id_idx ON sessions (user_id, updated_at DESC);
 ALTER TABLE sessions ADD COLUMN IF NOT EXISTS archived BOOLEAN NOT NULL DEFAULT FALSE;
 CREATE INDEX IF NOT EXISTS sessions_user_active_idx ON sessions (user_id, archived, updated_at DESC);
+ALTER TABLE sessions ADD COLUMN IF NOT EXISTS system_prompt TEXT;
 
 CREATE TABLE IF NOT EXISTS mcp_servers (
   id             UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -126,12 +127,33 @@ export async function createSession(
   userId: string,
   sessionId: string,
   title: string | null = null,
+  systemPrompt: string | null = null,
 ): Promise<void> {
   await getPool().query(
-    `INSERT INTO sessions (id, user_id, title)
-     VALUES ($1, $2, $3)
+    `INSERT INTO sessions (id, user_id, title, system_prompt)
+     VALUES ($1, $2, $3, $4)
      ON CONFLICT (id) DO NOTHING`,
-    [sessionId, userId, title],
+    [sessionId, userId, title, systemPrompt],
+  );
+}
+
+export async function getSessionSystemPrompt(
+  sessionId: string,
+): Promise<string | null> {
+  const { rows } = await getPool().query<{ system_prompt: string | null }>(
+    'SELECT system_prompt FROM sessions WHERE id = $1',
+    [sessionId],
+  );
+  return rows[0]?.system_prompt ?? null;
+}
+
+export async function setSessionSystemPrompt(
+  sessionId: string,
+  systemPrompt: string | null,
+): Promise<void> {
+  await getPool().query(
+    'UPDATE sessions SET system_prompt = $2, updated_at = now() WHERE id = $1',
+    [sessionId, systemPrompt],
   );
 }
 

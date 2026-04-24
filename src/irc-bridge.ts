@@ -35,6 +35,17 @@ export function chunkForIrc(text: string, max = 400): string[] {
   return out;
 }
 
+const IRC_SYSTEM_PROMPT = `You are ted, a helpful assistant in an IRC channel.
+
+Format rules for IRC:
+- Keep responses short and conversational — 1-3 sentences is ideal
+- Never use markdown formatting (no **bold**, *italic*, # headers, or \`code blocks\`)
+- Never use emoji
+- No bullet points or numbered lists — use plain prose
+- If you must list items, separate with commas in a sentence
+- Long explanations should be split across multiple short messages
+- Match the casual tone of IRC — be direct, concise, terse`;
+
 // ---------- runtime glue ----------
 
 type Config = {
@@ -73,14 +84,18 @@ function loadConfig(): Config {
   };
 }
 
-async function postToWebhook(cfg: Config, msg: string): Promise<void> {
+async function postToWebhook(
+  cfg: Config,
+  msg: string,
+  extra?: Record<string, unknown>,
+): Promise<void> {
   const res = await fetch(`${cfg.webhookUrl}/message`, {
     method: 'POST',
     headers: {
       'content-type': 'application/json',
       'X-User-ID': cfg.userId,
     },
-    body: JSON.stringify({ sessionId: cfg.sessionId, msg }),
+    body: JSON.stringify({ sessionId: cfg.sessionId, msg, ...extra }),
   });
   if (!res.ok) {
     const body = await res.text().catch(() => '');
@@ -167,7 +182,9 @@ async function main() {
   // reachable so the bridge survives being started before the ted service.
   for (let attempt = 1; ; attempt++) {
     try {
-      await postToWebhook(cfg, `[irc bridge online in ${cfg.channel}]`);
+      await postToWebhook(cfg, `[irc bridge online in ${cfg.channel}]`, {
+        systemPrompt: IRC_SYSTEM_PROMPT,
+      });
       break;
     } catch (err) {
       console.error(

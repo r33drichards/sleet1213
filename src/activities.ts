@@ -10,6 +10,8 @@ import {
   listMcpServers,
   createMcpServer,
   deleteMcpServer,
+  getSessionSystemPrompt,
+  setSessionSystemPrompt,
   McpNameTakenError,
   type McpServerRow,
 } from './db.js';
@@ -156,6 +158,30 @@ const BUILTIN_TOOLS: ClaudeTool[] = [
       required: ['name'],
     },
   },
+  {
+    name: 'ted__get_system_prompt',
+    description: 'Get the current system prompt for this session.',
+    input_schema: {
+      type: 'object',
+      properties: {},
+    },
+  },
+  {
+    name: 'ted__set_system_prompt',
+    description:
+      'Set or update the system prompt for this session. ' +
+      'Takes effect on the next turn. Pass empty string to clear.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        prompt: {
+          type: 'string',
+          description: 'The new system prompt text (empty string to clear)',
+        },
+      },
+      required: ['prompt'],
+    },
+  },
 ];
 
 const BUILTIN_NAMES = new Set(BUILTIN_TOOLS.map((t) => t.name));
@@ -167,6 +193,7 @@ const BUILTIN_NAMES = new Set(BUILTIN_TOOLS.map((t) => t.name));
  */
 async function handleBuiltinTool(
   userId: string,
+  sessionId: string,
   name: string,
   input: Record<string, unknown>,
 ): Promise<{ content: string; toolsChanged: boolean }> {
@@ -244,6 +271,27 @@ async function handleBuiltinTool(
       };
     }
 
+    case 'ted__get_system_prompt': {
+      const current = await getSessionSystemPrompt(sessionId);
+      return {
+        content: current
+          ? `Current system prompt:\n${current}`
+          : 'No system prompt is set for this session.',
+        toolsChanged: false,
+      };
+    }
+
+    case 'ted__set_system_prompt': {
+      const prompt = String(input.prompt ?? '');
+      await setSessionSystemPrompt(sessionId, prompt || null);
+      return {
+        content: prompt
+          ? 'System prompt updated. It will take effect on the next turn.'
+          : 'System prompt cleared. It will take effect on the next turn.',
+        toolsChanged: false,
+      };
+    }
+
     default:
       return { content: `unknown builtin tool: ${name}`, toolsChanged: false };
   }
@@ -314,6 +362,7 @@ export async function streamClaude(req: StreamReq): Promise<string> {
         max_tokens: MAX_TOKENS,
         messages,
         tools: allTools,
+        ...(req.systemPrompt ? { system: req.systemPrompt } : {}),
       };
 
       const content = await runOneStream(params, req.sessionId);
@@ -343,6 +392,7 @@ export async function streamClaude(req: StreamReq): Promise<string> {
           heartbeat();
           const result = await handleBuiltinTool(
             req.userId,
+            req.sessionId,
             prefixed,
             (tu.input as Record<string, unknown>) ?? {},
           );
@@ -407,6 +457,10 @@ export async function streamClaude(req: StreamReq): Promise<string> {
   } finally {
     await publishTurnEnd(req.sessionId);
   }
+}
+
+export async function getSystemPrompt(sessionId: string): Promise<string | null> {
+  return getSessionSystemPrompt(sessionId);
 }
 
 export type PersistTurnReq = {
