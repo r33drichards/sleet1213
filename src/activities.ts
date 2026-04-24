@@ -7,8 +7,9 @@ import {
   touchSession,
   renameSession,
   loadMemoryContext,
+  listEnabledMcpServers,
 } from './db.js';
-import { createMemoryMcpServer } from './memory-mcp.js';
+import { createTedMcpServer } from './memory-mcp.js';
 import type { Role, StreamReq } from './types.js';
 
 const MODEL = process.env.ANTHROPIC_MODEL ?? 'claude-sonnet-4-5';
@@ -24,7 +25,18 @@ const MODEL = process.env.ANTHROPIC_MODEL ?? 'claude-sonnet-4-5';
  */
 export async function streamClaude(req: StreamReq): Promise<{ text: string; sdkSessionId: string }> {
   const memoryCtx = await loadMemoryContext(req.userId);
-  const memoryServer = createMemoryMcpServer(req.userId);
+  const tedServer = createTedMcpServer(req.userId);
+
+  // Build MCP servers from user's DB config
+  const dbServers = await listEnabledMcpServers(req.userId);
+  const userMcpServers: Record<string, any> = {};
+  for (const s of dbServers) {
+    if (s.transport === 'stdio' && s.command) {
+      userMcpServers[s.name] = { command: s.command, args: s.args ?? [] };
+    } else if (s.url) {
+      userMcpServers[s.name] = { type: 'http', url: s.url };
+    }
+  }
 
   const PLUGIN_DIR = '/app/ted-plugin';
   const SKILLS_DIR = `${PLUGIN_DIR}/skills`;
@@ -32,7 +44,9 @@ export async function streamClaude(req: StreamReq): Promise<{ text: string; sdkS
   const systemParts: string[] = [
     `You can create and edit your own skills by writing SKILL.md files under ${SKILLS_DIR}/. ` +
     'Each skill goes in its own subdirectory (e.g. skills/dice/SKILL.md). ' +
-    'Use the Write or Edit tools directly — no permission needed.',
+    'Use the Write or Edit tools directly — no permission needed. ' +
+    'You can also add and remove MCP tool servers using mcp__ted__mcp_add, mcp__ted__mcp_list, mcp__ted__mcp_remove. ' +
+    'New servers become available on the next turn.',
   ];
   if (memoryCtx) systemParts.push(memoryCtx);
 
@@ -59,7 +73,8 @@ export async function streamClaude(req: StreamReq): Promise<{ text: string; sdkS
     settingSources: ['project'],
     includePartialMessages: true,
     mcpServers: {
-      memory: memoryServer,
+      ted: tedServer,
+      ...userMcpServers,
     },
     // Resume previous SDK session for multi-turn context
     ...(req.sdkSessionId ? { resume: req.sdkSessionId } : {}),
