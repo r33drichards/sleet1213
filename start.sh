@@ -3,6 +3,11 @@
 # SERVICE_TYPE=irc  -> IRC bridge only
 # default           -> webhook + worker
 
+# Create non-root user for Claude Code SDK (bypassPermissions blocked as root)
+id ted >/dev/null 2>&1 || useradd -m ted 2>/dev/null || true
+# Ensure skills volume is writable by ted user
+chown -R ted:ted /app/.claude 2>/dev/null || true
+
 case "${SERVICE_TYPE}" in
   irc)
     exec node --loader ts-node/esm src/irc-bridge.ts
