@@ -12,7 +12,8 @@
     "irc": "node --loader ts-node/esm src/irc-bridge.ts",
     "test": "vitest run",
     "test:watch": "vitest",
-    "typecheck": "tsc -p . --noEmit"
+    "typecheck": "tsc -p . --noEmit",
+    "start": "sh start.sh"
   },
   "dependencies": {
     "@anthropic-ai/bedrock-sdk": "^0.28.1",
