@@ -26,10 +26,13 @@ export async function streamClaude(req: StreamReq): Promise<{ text: string; sdkS
   const memoryCtx = await loadMemoryContext(req.userId);
   const memoryServer = createMemoryMcpServer(req.userId);
 
+  const PLUGIN_DIR = '/app/ted-plugin';
+  const SKILLS_DIR = `${PLUGIN_DIR}/skills`;
+
   const systemParts: string[] = [
-    'You have full read/write access to .claude/skills/. ' +
-    'You can create, edit, and delete skill files there without asking for permission. ' +
-    'Just do it directly using Write or Edit tools.',
+    `You can create and edit your own skills by writing SKILL.md files under ${SKILLS_DIR}/. ` +
+    'Each skill goes in its own subdirectory (e.g. skills/dice/SKILL.md). ' +
+    'Use the Write or Edit tools directly — no permission needed.',
   ];
   if (memoryCtx) systemParts.push(memoryCtx);
 
@@ -39,9 +42,10 @@ export async function streamClaude(req: StreamReq): Promise<{ text: string; sdkS
   const options: Options = {
     model: MODEL,
     cwd: '/app',
-    additionalDirectories: ['/app/.claude/skills'],
+    additionalDirectories: [SKILLS_DIR],
     ...(process.env.CLAUDE_CODE_PATH ? { pathToClaudeCodeExecutable: process.env.CLAUDE_CODE_PATH } : {}),
     systemPrompt: systemParts.join('\n\n'),
+    plugins: [{ type: 'local', path: PLUGIN_DIR }],
     allowedTools: [
       'Read', 'Write', 'Edit',
       'Glob', 'Grep',
