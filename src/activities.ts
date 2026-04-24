@@ -473,10 +473,7 @@ export async function streamClaude(req: StreamReq): Promise<string> {
         model: MODEL,
         max_tokens: MAX_TOKENS,
         messages,
-        tools: [
-          ...allTools,
-          { type: 'code_execution_20250522' },
-        ],
+        tools: allTools,
         thinking: { type: 'enabled', budget_tokens: THINKING_BUDGET },
         ...(systemPrompt ? { system: systemPrompt } : {}),
       };
