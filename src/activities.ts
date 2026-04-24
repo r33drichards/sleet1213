@@ -418,15 +418,22 @@ async function runOneStream(
   }).stream(params);
 
   for await (const event of stream) {
-    if (event.type === 'content_block_delta') {
-      const delta = event.delta as { type: string; text?: string; thinking?: string };
-      if (delta?.type === 'text_delta' && typeof delta.text === 'string') {
-        await publishDelta(sessionId, delta.text);
-      } else if (delta?.type === 'thinking_delta' && typeof delta.thinking === 'string') {
-        await publishDelta(sessionId, delta.thinking);
+    const ev = event as {
+      type: string;
+      index?: number;
+      content_block?: { type: string; name?: string; id?: string };
+      delta?: { type: string; text?: string; thinking?: string };
+    };
+    if (ev.type === 'content_block_start' && ev.content_block?.type === 'tool_use') {
+      await publishDelta(sessionId, `\n[calling ${ev.content_block.name}]\n`);
+    } else if (ev.type === 'content_block_delta') {
+      if (ev.delta?.type === 'text_delta' && typeof ev.delta.text === 'string') {
+        await publishDelta(sessionId, ev.delta.text);
+      } else if (ev.delta?.type === 'thinking_delta' && typeof ev.delta.thinking === 'string') {
+        await publishDelta(sessionId, ev.delta.thinking);
       }
-      heartbeat();
     }
+    heartbeat();
   }
   const final = await stream.finalMessage();
   return final.content as ContentBlock[];
