@@ -75,7 +75,7 @@ function loadConfig(): Config {
     server: must('IRC_SERVER'),
     port: Number(process.env.IRC_PORT ?? 6667),
     tls: process.env.IRC_TLS === 'true',
-    nick: process.env.IRC_NICK ?? 'ted-bot',
+    nick: (process.env.IRC_NICK ?? 'ted-bot') + Math.random().toString(36).slice(2, 5),
     channel,
     sessionId: process.env.IRC_SESSION_ID ?? `irc-${channel.slice(1)}`,
     userId: must('IRC_USER_ID'),

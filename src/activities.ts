@@ -475,7 +475,6 @@ export async function streamClaude(req: StreamReq): Promise<string> {
         messages,
         tools: [
           ...allTools,
-          { type: 'web_search_20250305' },
           { type: 'code_execution_20250522' },
         ],
         thinking: { type: 'enabled', budget_tokens: THINKING_BUDGET },
