@@ -1,7 +1,7 @@
 import { query } from '@anthropic-ai/claude-agent-sdk';
 import type { Options } from '@anthropic-ai/claude-agent-sdk';
 import { heartbeat } from '@temporalio/activity';
-import { publishDelta, publishThinking, publishToolCall, publishTurnEnd } from './publish.js';
+import { publishDelta, publishThinking, publishToolCall, publishMessageStop, publishTurnEnd } from './publish.js';
 import {
   appendMessage,
   touchSession,
@@ -139,6 +139,12 @@ export async function streamClaude(req: StreamReq): Promise<{ text: string; sdkS
           }
         } else if (ev.type === 'content_block_start' && ev.content_block?.type === 'tool_use') {
           await publishToolCall(req.sessionId, ev.content_block.name ?? 'unknown');
+        } else if (ev.type === 'message_stop') {
+          // One LLM iteration finished (Bedrock message_stop). The bridge
+          // flushes its accumulated text buffer here so each iteration
+          // shows up as its own chat reply instead of getting concatenated
+          // with later iterations into one mega-message at turn_end.
+          await publishMessageStop(req.sessionId);
         }
       }
 

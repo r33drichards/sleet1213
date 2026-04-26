@@ -180,16 +180,25 @@ async function streamToIrc(
     } else if (event.type === 'thinking' && typeof event.text === 'string') {
       thinking += event.text;
     } else if (event.type === 'tool_call' && event.name) {
-      // Don't announce every tool call — agent runs commonly chain 20+ Bash
-      // calls per turn (e.g. polling chest state) and per-call announcements
-      // flood Twitch chat with `[using Bash]` lines that drown out the
-      // actual text reply. Only announce non-Bash tools that are worth
-      // surfacing to a viewer. To restore the old behavior set
-      // IRC_ANNOUNCE_ALL_TOOLS=true.
-      const announceAll = (process.env.IRC_ANNOUNCE_ALL_TOOLS ?? 'false').toLowerCase() === 'true';
-      const noisy = new Set(['Bash', 'Read', 'Glob', 'Grep', 'TodoWrite']);
-      if (announceAll || !noisy.has(event.name)) {
-        sendPrivmsg(`[using ${event.name}]`);
+      sendPrivmsg(`[using ${event.name}]`);
+    } else if (event.type === 'message_stop') {
+      // One LLM iteration ended (Bedrock message_stop). Flush the
+      // current iteration's text to chat as its own reply chunk, then
+      // reset so the NEXT iteration's text doesn't get concatenated
+      // with this one. (Without this, multi-iteration runs dump every
+      // iteration's text in one big blob at turn_end — looks like the
+      // agent is "replaying from the beginning" every time.)
+      if (thinking.trim()) {
+        for (const chunk of chunkForIrc(`[thinking] ${thinking}`)) {
+          sendPrivmsg(chunk);
+        }
+        thinking = '';
+      }
+      if (pending.trim()) {
+        for (const chunk of chunkForIrc(pending)) {
+          sendPrivmsg(chunk);
+        }
+        pending = '';
       }
     } else if (event.type === 'turn_end') {
       if (thinking.trim()) {

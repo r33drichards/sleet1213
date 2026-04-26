@@ -12,6 +12,7 @@ export type StreamEvent =
   | { type: 'delta'; text: string }
   | { type: 'thinking'; text: string }
   | { type: 'tool_call'; name: string }
+  | { type: 'message_stop' }
   | { type: 'turn_end' };
 
 /**
@@ -50,6 +51,27 @@ export async function publishThinking(sessionId: string, text: string): Promise<
 export async function publishToolCall(sessionId: string, name: string): Promise<void> {
   const r = getRedis();
   const event: StreamEvent = { type: 'tool_call', name };
+  await r.xadd(
+    streamKey(sessionId),
+    'MAXLEN',
+    '~',
+    String(STREAM_MAXLEN),
+    '*',
+    'data',
+    JSON.stringify(event),
+  );
+}
+
+/**
+ * Sentinel marking the end of one LLM iteration within a turn (i.e. one
+ * `message_stop` from Bedrock). The IRC bridge uses this as the boundary
+ * to flush the current iteration's text to chat — each iteration becomes
+ * its own visible reply chunk, instead of all iterations' text getting
+ * concatenated and dumped at turn_end.
+ */
+export async function publishMessageStop(sessionId: string): Promise<void> {
+  const r = getRedis();
+  const event: StreamEvent = { type: 'message_stop' };
   await r.xadd(
     streamKey(sessionId),
     'MAXLEN',
