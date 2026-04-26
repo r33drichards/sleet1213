@@ -38,15 +38,28 @@ export async function streamClaude(req: StreamReq): Promise<{ text: string; sdkS
     }
   }
 
-  const PLUGIN_DIR = process.env.SLEET1213_PLUGIN_DIR ?? '/app/ted-plugin';
-  const SKILLS_DIR = `${PLUGIN_DIR}/skills`;
+  // Two-plugin overlay so the agent has both:
+  //   * REPO_PLUGIN_DIR — read-only skills checked into github (sleet1213
+  //     core skills like minecraft-bot, sleet1213-self-admin). Edits go
+  //     through "edit on your laptop / push / git pull on the box".
+  //   * LOCAL_PLUGIN_DIR — writable on-host scratch dir. New skills the
+  //     agent invents at runtime live here. Survives restarts.
+  const REPO_PLUGIN_DIR =
+    process.env.SLEET1213_REPO_PLUGIN_DIR ??
+    process.env.SLEET1213_PLUGIN_DIR ??
+    '/app/ted-plugin';
+  const LOCAL_PLUGIN_DIR =
+    process.env.SLEET1213_LOCAL_PLUGIN_DIR ??
+    '/home/ubuntu/.local/share/sleet1213/plugin';
+  const REPO_SKILLS_DIR = `${REPO_PLUGIN_DIR}/skills`;
+  const LOCAL_SKILLS_DIR = `${LOCAL_PLUGIN_DIR}/skills`;
 
   const systemParts: string[] = [
-    `You can create and edit your own skills by writing SKILL.md files under ${SKILLS_DIR}/. ` +
-    'Each skill goes in its own subdirectory (e.g. skills/dice/SKILL.md). ' +
-    'Use the Write or Edit tools directly — no permission needed. ' +
-    'You can also add and remove MCP tool servers using mcp__ted__mcp_add, mcp__ted__mcp_list, mcp__ted__mcp_remove. ' +
-    'New servers become available on the next turn.',
+    `You have two skill directories overlaid:\n` +
+      `  - REPO (read-only): ${REPO_SKILLS_DIR}/ — core skills checked into github.com/r33drichards/sleet1213. To edit these, edit the repo on a workstation, push to master, and run \`git pull\` + \`systemctl --user restart sleet1213-worker\` on this host.\n` +
+      `  - LOCAL (writable): ${LOCAL_SKILLS_DIR}/ — your scratch dir. New skills you invent at runtime go here. Use the Write tool to create \`${LOCAL_SKILLS_DIR}/<name>/SKILL.md\` with YAML front matter (name + description), then a markdown body. Skills are reread per turn — no restart needed for skill changes.\n` +
+      `Pick LOCAL by default for any new skill. Use REPO only for core capabilities you'd want every future deployment to inherit, and even then go via the github repo, not direct edits.`,
+    `You can also add and remove MCP tool servers using mcp__ted__mcp_add, mcp__ted__mcp_list, mcp__ted__mcp_remove. New servers become available on the next turn.`,
   ];
   if (memoryCtx) systemParts.push(memoryCtx);
 
@@ -55,11 +68,14 @@ export async function streamClaude(req: StreamReq): Promise<{ text: string; sdkS
 
   const options: Options = {
     model: MODEL,
-    cwd: '/app',
-    additionalDirectories: [SKILLS_DIR],
+    cwd: process.env.CLAUDE_CWD ?? '/home/ubuntu/sleet1213',
+    additionalDirectories: [REPO_SKILLS_DIR, LOCAL_SKILLS_DIR],
     ...(process.env.CLAUDE_CODE_PATH ? { pathToClaudeCodeExecutable: process.env.CLAUDE_CODE_PATH } : {}),
     systemPrompt: systemParts.join('\n\n'),
-    plugins: [{ type: 'local', path: PLUGIN_DIR }],
+    plugins: [
+      { type: 'local', path: REPO_PLUGIN_DIR },
+      { type: 'local', path: LOCAL_PLUGIN_DIR },
+    ],
     allowedTools: [
       'Read', 'Write', 'Edit',
       'Glob', 'Grep',
