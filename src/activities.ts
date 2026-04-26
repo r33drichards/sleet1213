@@ -38,7 +38,7 @@ export async function streamClaude(req: StreamReq): Promise<{ text: string; sdkS
     }
   }
 
-  const PLUGIN_DIR = '/app/ted-plugin';
+  const PLUGIN_DIR = process.env.SLEET1213_PLUGIN_DIR ?? '/app/ted-plugin';
   const SKILLS_DIR = `${PLUGIN_DIR}/skills`;
 
   const systemParts: string[] = [
