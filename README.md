@@ -1,6 +1,12 @@
-# claude-temporal-chat
+# sleet1213
 
-Durable Claude chat sessions over Temporal. One workflow per session, webhook for message delivery.
+Durable Claude chat agent for the `sleet1213` Twitch channel. Forked from [r33drichards/ted](https://github.com/r33drichards/ted) with:
+
+- Full Bash + filesystem tools enabled in the Claude Agent SDK so the agent can drive systemd, build code, and self-edit skills on the EC2 host that streams the Minecraft bot.
+- `IRC_ALLOWED_NICKS` allowlist + `IRC_REQUIRE_MENTION` filter so random Twitch viewers can't trigger agent turns — only `lokvolt` (the operator) drives the bot.
+- Default IRC nick `sleet1213` (matches the Twitch channel/bot identity).
+
+One Temporal workflow per session; webhook for message delivery.
 
 ## Prereqs
 

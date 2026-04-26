@@ -47,6 +47,18 @@ type Config = {
   userId: string;
   webhookUrl: string;
   password?: string;
+  /**
+   * Comma-separated list of IRC nicks (case-insensitive) whose chat lines are
+   * forwarded to the agent. Empty/unset = forward everyone. Set to e.g.
+   * `lokvolt` so random Twitch viewers can't trigger Claude turns.
+   */
+  allowedNicks?: Set<string>;
+  /**
+   * If set, only messages that mention the bot (e.g. `@sleet1213 ...` or just
+   * `sleet1213` as a token) are forwarded. Defaults to true on Twitch since
+   * the bot is the broadcaster and ambient chatter shouldn't trigger turns.
+   */
+  requireMention: boolean;
 };
 
 function must(name: string): string {
@@ -60,17 +72,32 @@ function loadConfig(): Config {
   if (!channel.startsWith('#') && !channel.startsWith('&')) {
     throw new Error('IRC_CHANNEL must start with # or &');
   }
+  const rawAllow = (process.env.IRC_ALLOWED_NICKS ?? '').trim();
+  const allowedNicks = rawAllow
+    ? new Set(rawAllow.split(',').map((n) => n.trim().toLowerCase()).filter(Boolean))
+    : undefined;
+  const requireMentionRaw = (process.env.IRC_REQUIRE_MENTION ?? 'true').trim().toLowerCase();
+  const requireMention = requireMentionRaw !== 'false' && requireMentionRaw !== '0';
   return {
     server: must('IRC_SERVER'),
     port: Number(process.env.IRC_PORT ?? 6667),
     tls: process.env.IRC_TLS === 'true',
-    nick: process.env.IRC_NICK ?? 'ted-bot',
+    nick: process.env.IRC_NICK ?? 'sleet1213',
     channel,
     sessionId: process.env.IRC_SESSION_ID ?? `irc-${channel.slice(1)}`,
     userId: must('IRC_USER_ID'),
     webhookUrl: process.env.WEBHOOK_URL ?? 'http://localhost:8787',
     password: process.env.IRC_PASSWORD,
+    allowedNicks,
+    requireMention,
   };
+}
+
+function isMentioned(message: string, botNick: string): boolean {
+  const lc = message.toLowerCase();
+  const nick = botNick.toLowerCase();
+  // Match `@sleet1213` or bare `sleet1213` as a word boundary.
+  return new RegExp(`(^|[^a-z0-9_])@?${nick}($|[^a-z0-9_])`, 'i').test(lc);
 }
 
 async function postToWebhook(
@@ -223,8 +250,19 @@ async function main() {
     (event: { target: string; nick: string; message: string }) => {
       if (event.target !== cfg.channel) return;
       // Ignore own messages and any stale instances with the same base nick
-      const baseNick = (process.env.IRC_NICK ?? 'ted-bot');
+      const baseNick = (process.env.IRC_NICK ?? 'sleet1213');
       if (event.nick.startsWith(baseNick)) return;
+      // Allowlist filter: if IRC_ALLOWED_NICKS is set, only those nicks trigger
+      // an agent turn. Other lines are silently ignored (no webhook call).
+      if (cfg.allowedNicks && !cfg.allowedNicks.has(event.nick.toLowerCase())) {
+        return;
+      }
+      // Mention filter: on Twitch the bot is the broadcaster, so ambient
+      // chatter shouldn't trigger turns. Require the bot's nick to appear
+      // in the message text (with or without `@`).
+      if (cfg.requireMention && !isMentioned(event.message, cfg.nick)) {
+        return;
+      }
       const payload = `${event.nick}: ${event.message}`;
       postToWebhook(cfg, payload).catch((err) =>
         console.error('[irc] webhook post failed:', (err as Error).message),

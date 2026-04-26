@@ -1,6 +1,8 @@
-# Ted
+# sleet1213
 
-Durable Claude chat agent powered by the Claude Agent SDK, Temporal workflows, and an IRC bridge.
+Durable Claude chat agent for the `sleet1213` Twitch channel — fork of [r33drichards/ted](https://github.com/r33drichards/ted). Powered by the Claude Agent SDK, Temporal workflows, and an IRC bridge that connects directly to Twitch chat.
+
+The agent is the brain behind a live Minecraft bot stream — it talks to the operator (`lokvolt`) in Twitch chat and drives `btone-bot` (a headless Minecraft client) over a local RPC bridge.
 
 ## Architecture
 
@@ -15,15 +17,22 @@ Durable Claude chat agent powered by the Claude Agent SDK, Temporal workflows, a
 
 ## Agent Capabilities
 
-The agent uses the Claude Agent SDK with these tools enabled:
-- Read, Write, Edit, Glob, Grep (filesystem)
-- WebSearch, WebFetch (web)
-- Skill (self-editable skills in .claude/skills/)
-- Agent (subagents)
-- MCP tools (from configured servers)
-- Memory tools (via in-process MCP server)
+The agent uses the Claude Agent SDK with these tools enabled (vs the upstream `ted` defaults — sleet1213 has the full Bash + filesystem set so the agent can drive systemd, build code, and self-edit skills on the EC2 host):
 
-No Bash or Monitor access.
+- Read, Write, Edit, Glob, Grep (filesystem)
+- Bash (full shell access — agent runs as `ubuntu` on the EC2 host with sudoers entries for the bot/stream services)
+- WebSearch, WebFetch (web)
+- TodoWrite, NotebookEdit
+- Skill (self-editable skills in `.claude/skills/`)
+- Agent (subagents)
+- MCP tools (`mcp__*`, including the in-process `sleet1213` memory MCP)
+
+## Chat ingress filters
+
+The IRC bridge has two filters meant for a public Twitch channel:
+
+- `IRC_ALLOWED_NICKS` (comma-separated, case-insensitive) — only listed nicks trigger an agent turn. Set to `lokvolt` so random chat viewers can't direct the bot. Empty/unset = forward everyone.
+- `IRC_REQUIRE_MENTION` (default `true`) — only forward messages that mention the bot's nick (`@sleet1213` or bare `sleet1213`). Ambient chatter is dropped without a webhook call.
 
 ## E2E Testing
 
