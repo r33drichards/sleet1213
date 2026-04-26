@@ -180,7 +180,17 @@ async function streamToIrc(
     } else if (event.type === 'thinking' && typeof event.text === 'string') {
       thinking += event.text;
     } else if (event.type === 'tool_call' && event.name) {
-      sendPrivmsg(`[using ${event.name}]`);
+      // Don't announce every tool call — agent runs commonly chain 20+ Bash
+      // calls per turn (e.g. polling chest state) and per-call announcements
+      // flood Twitch chat with `[using Bash]` lines that drown out the
+      // actual text reply. Only announce non-Bash tools that are worth
+      // surfacing to a viewer. To restore the old behavior set
+      // IRC_ANNOUNCE_ALL_TOOLS=true.
+      const announceAll = (process.env.IRC_ANNOUNCE_ALL_TOOLS ?? 'false').toLowerCase() === 'true';
+      const noisy = new Set(['Bash', 'Read', 'Glob', 'Grep', 'TodoWrite']);
+      if (announceAll || !noisy.has(event.name)) {
+        sendPrivmsg(`[using ${event.name}]`);
+      }
     } else if (event.type === 'turn_end') {
       if (thinking.trim()) {
         for (const chunk of chunkForIrc(`[thinking] ${thinking}`)) {
