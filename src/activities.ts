@@ -215,13 +215,18 @@ export async function streamClaude(req: StreamReq): Promise<{ text: string; sdkS
   } finally {
     clearInterval(hbTick);
     try { await cancelSub.quit(); } catch {}
-    if (lastAssistantText) {
-      await publishFinalText(req.sessionId, lastAssistantText);
+    if (abort.signal.aborted) interrupted = true;
+    // Always publish *something* to chat so the user sees the turn ended.
+    // Without this, an interrupted-before-any-text turn produces a DB-side
+    // [interrupted by user] marker that never reaches the IRC bridge,
+    // leaving chat silent after `[using Tool]` lines.
+    const chatText =
+      lastAssistantText || (interrupted ? '[interrupted by user]' : '');
+    if (chatText) {
+      await publishFinalText(req.sessionId, chatText);
     }
     await publishTurnEnd(req.sessionId);
   }
-
-  if (abort.signal.aborted) interrupted = true;
 
   return { text: lastAssistantText, sdkSessionId, interrupted };
 }
