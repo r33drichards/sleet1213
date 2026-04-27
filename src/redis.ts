@@ -24,3 +24,7 @@ export function getSubscriberClient(): RedisClient {
 export function cancelChannel(sessionId: string): string {
   return `sleet1213:cancel:${sessionId}`;
 }
+
+export function inputChannel(sessionId: string): string {
+  return `sleet1213:input:${sessionId}`;
+}

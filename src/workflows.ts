@@ -7,7 +7,6 @@ import {
 } from '@temporalio/workflow';
 import type * as activities from './activities.js';
 import { userMessageSignal, closeSignal, transcriptQuery } from './signals.js';
-import { drainInbox } from './inbox.js';
 import type { Msg } from './types.js';
 
 const { streamClaude, persistTurn, generateTitle } = proxyActivities<
@@ -27,10 +26,16 @@ const { streamClaude, persistTurn, generateTitle } = proxyActivities<
   retry: { maximumAttempts: 1 },
 });
 
+// pushUserMessageToStream: tiny Redis publish, fail fast.
+const { pushUserMessageToStream } = proxyActivities<typeof activities>({
+  startToCloseTimeout: '5 seconds',
+  retry: { maximumAttempts: 1 },
+});
+
 // requestStreamCancel intentionally not proxied here — automatic cancel
-// is disabled in steer mode. The activity remains subscribed to the
-// Redis cancel channel, so an out-of-band publisher (e.g. a future
-// "stop" keyword handler or admin RPC) can still trigger an interrupt.
+// is disabled. The activity remains subscribed to the Redis cancel
+// channel, so an out-of-band publisher (e.g. a "stop" keyword handler
+// or admin RPC) can still trigger an interrupt.
 
 const HISTORY_LENGTH_LIMIT = 2000;
 
@@ -59,36 +64,59 @@ export async function chatSession(
     await condition(() => inbox.length > 0 || closed);
     if (closed) break;
 
-    const userTurn = drainInbox(inbox, history);
-    if (userTurn !== null) {
-      await persistTurn({ sessionId, role: 'user', content: userTurn, userId });
-    }
+    // Drain the FIRST queued message; the activity will be started with
+    // it as the initial prompt. Any subsequent messages that arrive
+    // during the activity are forwarded via Redis to streamInput so the
+    // agent sees them mid-turn (true interleaving — not interrupt, not
+    // queue-after-completion).
+    const firstMsg = inbox.shift()!;
+    history.push({ role: 'user', content: firstMsg });
+    await persistTurn({ sessionId, role: 'user', content: firstMsg, userId });
 
-    // "Steer" queue mode (per openclaw's queue-policy.ts:17): new user
-    // messages that arrive while this turn is running do NOT cancel the
-    // active run — they accumulate in `inbox` via userMessageSignal and
-    // get drained as the next user turn after this one finishes, with
-    // SDK session resume carrying context across. This avoids the rapid-
-    // fire-commands-cancel-each-other footgun. Explicit interrupt is
-    // still possible by publishing to the Redis cancel channel directly
-    // (the activity subscribes), so a future "stop"/"cancel" keyword
-    // path or admin RPC can wire one up without further changes here.
-    const result = await streamClaude({
-      sessionId,
-      history,
-      userId,
-      sdkSessionId: sdkSessionId || undefined,
-    });
+    let activityDone = false;
+    const activityPromise = (async () => {
+      try {
+        return await streamClaude({
+          sessionId,
+          history,
+          userId,
+          sdkSessionId: sdkSessionId || undefined,
+        });
+      } finally {
+        activityDone = true;
+      }
+    })();
+
+    // Forwarder: while the activity runs, push each new inbox message
+    // into the running SDK query via Redis.
+    const forwarderPromise = (async () => {
+      while (!activityDone) {
+        await condition(() => inbox.length > 0 || activityDone);
+        if (activityDone) return;
+        while (inbox.length > 0 && !activityDone) {
+          const m = inbox.shift()!;
+          history.push({ role: 'user', content: m });
+          await persistTurn({ sessionId, role: 'user', content: m, userId });
+          await pushUserMessageToStream({ sessionId, msg: m });
+        }
+      }
+    })();
+
+    const result = await activityPromise;
+    await forwarderPromise;
 
     sdkSessionId = result.sdkSessionId;
-    let assistantText = result.text;
-    if (result.interrupted) {
-      assistantText = (assistantText
-        ? assistantText.replace(/\s+$/, '') + ' '
-        : '') + '[interrupted by user]';
+    // The activity persists each per-result assistant message itself
+    // (because in interleave mode there can be multiple per turn). We
+    // only mirror the joined text into in-memory `history` so the
+    // workflow's transcriptQuery and continueAsNew snapshot stay in
+    // sync with the DB.
+    if (result.text) {
+      history.push({ role: 'assistant', content: result.text });
+    } else if (result.interrupted) {
+      history.push({ role: 'assistant', content: '[interrupted by user]' });
     }
-    history.push({ role: 'assistant', content: assistantText });
-    await persistTurn({ sessionId, role: 'assistant', content: assistantText, userId });
+    const userTurn = firstMsg;
 
     if (!titleGenerated && userTurn !== null) {
       titleGenerated = true;

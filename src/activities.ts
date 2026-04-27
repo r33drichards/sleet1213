@@ -2,7 +2,7 @@ import { query } from '@anthropic-ai/claude-agent-sdk';
 import type { Options } from '@anthropic-ai/claude-agent-sdk';
 import { heartbeat, Context } from '@temporalio/activity';
 import { publishDelta, publishThinking, publishToolCall, publishMessageStop, publishFinalText, publishTurnEnd } from './publish.js';
-import { getRedis, getSubscriberClient, cancelChannel } from './redis.js';
+import { getRedis, getSubscriberClient, cancelChannel, inputChannel } from './redis.js';
 import {
   appendMessage,
   touchSession,
@@ -67,23 +67,25 @@ export async function streamClaude(req: StreamReq): Promise<{ text: string; sdkS
   if (memoryCtx) systemParts.push(memoryCtx);
 
   const lastUserMsg = req.history.filter((m) => m.role === 'user').pop();
-  const prompt = lastUserMsg?.content ?? '';
+  const initialPrompt = lastUserMsg?.content ?? '';
 
-  // Workflow-driven interrupt path: the workflow calls requestStreamCancel
-  // when a new user message arrives mid-turn, which publishes to a Redis
-  // channel this activity subscribes to. We use Redis (rather than Temporal
-  // CancellationScope) because Temporal's state machine errors out if a
-  // cancel command lands on an activity still in SCHEDULED state.
-  // Temporal-level cancellation (e.g. workflow close) is also wired so a
-  // shutting-down workflow still aborts cleanly.
+  // Cancel path: any publish to sleet1213:cancel:<sessionId> aborts the
+  // SDK. Currently no automatic publisher (steer-by-default), but kept
+  // available for an out-of-band stop. Temporal context cancellation is
+  // also bridged so a workflow close shuts the SDK down cleanly.
   const abort = new AbortController();
   Context.current().cancellationSignal.addEventListener('abort', () => abort.abort());
 
   const cancelSub = getSubscriberClient();
   await cancelSub.subscribe(cancelChannel(req.sessionId));
-  cancelSub.on('message', (_chan, _msg) => {
-    abort.abort();
-  });
+  cancelSub.on('message', () => abort.abort());
+
+  // Interleave path: subscribe to sleet1213:input:<sessionId>. Each
+  // published string is pushed into the running SDK query as a new user
+  // message via streamInput, so the agent sees it mid-turn and adapts
+  // without restarting.
+  const inputSub = getSubscriberClient();
+  await inputSub.subscribe(inputChannel(req.sessionId));
 
   const options: Options = {
     model: MODEL,
@@ -122,18 +124,65 @@ export async function streamClaude(req: StreamReq): Promise<{ text: string; sdkS
   let lastAssistantText = '';
   let sdkSessionId = req.sdkSessionId ?? '';
   let interrupted = false;
+  const assistantTexts: string[] = [];
 
-  // If resume fails (stale session), retry without resume
+  // Pumped input generator. The first item is the initial prompt; further
+  // items are fed by the Redis input subscription. The activity exits when
+  // the agent has emitted a `result` for every queued user message AND no
+  // new message has arrived within INTERLEAVE_GRACE_MS.
+  type Pending =
+    | { kind: 'msg'; text: string }
+    | { kind: 'close' };
+  const pendingQueue: Pending[] = [{ kind: 'msg', text: initialPrompt }];
+  // Wrapper object so TS doesn't narrow the property away inside closures.
+  const wakeRef: { fn: (() => void) | null } = { fn: null };
+  const enqueue = (p: Pending) => {
+    pendingQueue.push(p);
+    const f = wakeRef.fn;
+    wakeRef.fn = null;
+    if (f) f();
+  };
+
+  let pendingResults = 1; // counts user messages whose `result` we haven't seen
+  const INTERLEAVE_GRACE_MS = 1500;
+  let graceTimer: NodeJS.Timeout | null = null;
+  let inputClosed = false;
+
+  inputSub.on('message', (_chan, msg) => {
+    if (graceTimer) { clearTimeout(graceTimer); graceTimer = null; }
+    pendingResults++;
+    enqueue({ kind: 'msg', text: msg });
+    // (workflow already persisted this user turn before publishing)
+  });
+
+  async function* userInputStream(): AsyncIterable<any> {
+    while (!inputClosed) {
+      while (pendingQueue.length > 0) {
+        const item = pendingQueue.shift()!;
+        if (item.kind === 'close') { inputClosed = true; return; }
+        yield {
+          type: 'user',
+          message: { role: 'user', content: item.text },
+          parent_tool_use_id: null,
+          session_id: sdkSessionId || undefined,
+        };
+      }
+      if (inputClosed) return;
+      await new Promise<void>((resolve) => { wakeRef.fn = resolve; });
+    }
+  }
+
+  // If resume fails (stale session), retry without resume.
   async function* runQuery() {
     try {
-      yield* query({ prompt, options });
+      yield* query({ prompt: userInputStream(), options });
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       if (msg.includes('No conversation found') && options.resume) {
         console.log(`[agent] stale session ${options.resume}, starting fresh`);
         delete options.resume;
         sdkSessionId = '';
-        yield* query({ prompt, options });
+        yield* query({ prompt: userInputStream(), options });
       } else {
         throw err;
       }
@@ -194,11 +243,26 @@ export async function streamClaude(req: StreamReq): Promise<{ text: string; sdkS
         }
       }
 
-      // Result — agent finished this turn
+      // Result — agent finished one user-message-worth of work. Persist
+      // and publish the assistant's reply, decrement the pending counter,
+      // and start the grace timer if the queue is empty. New messages
+      // arriving within the grace window keep the activity alive (and
+      // cancel the timer).
       if (message.type === 'result') {
-        const result = (message as any).result;
-        if (typeof result === 'string' && result) {
-          lastAssistantText = result;
+        const r = (message as any).result;
+        if (typeof r === 'string' && r) lastAssistantText = r;
+        if (lastAssistantText) {
+          await publishFinalText(req.sessionId, lastAssistantText);
+          await appendMessage(req.sessionId, 'assistant', lastAssistantText, req.userId).catch(() => {});
+          assistantTexts.push(lastAssistantText);
+          lastAssistantText = '';
+        }
+        pendingResults = Math.max(0, pendingResults - 1);
+        if (pendingResults === 0 && pendingQueue.length === 0 && !abort.signal.aborted) {
+          if (graceTimer) clearTimeout(graceTimer);
+          graceTimer = setTimeout(() => {
+            enqueue({ kind: 'close' });
+          }, INTERLEAVE_GRACE_MS);
         }
       }
     }
@@ -214,21 +278,37 @@ export async function streamClaude(req: StreamReq): Promise<{ text: string; sdkS
     }
   } finally {
     clearInterval(hbTick);
+    if (graceTimer) clearTimeout(graceTimer);
+    inputClosed = true;
+    const wake = wakeRef.fn;
+    wakeRef.fn = null;
+    if (wake) wake();
     try { await cancelSub.quit(); } catch {}
+    try { await inputSub.quit(); } catch {}
     if (abort.signal.aborted) interrupted = true;
-    // Always publish *something* to chat so the user sees the turn ended.
-    // Without this, an interrupted-before-any-text turn produces a DB-side
-    // [interrupted by user] marker that never reaches the IRC bridge,
-    // leaving chat silent after `[using Tool]` lines.
-    const chatText =
-      lastAssistantText || (interrupted ? '[interrupted by user]' : '');
-    if (chatText) {
-      await publishFinalText(req.sessionId, chatText);
+    // If the activity ends without any assistant reply having reached
+    // chat (e.g. aborted before text materialised), surface the marker
+    // so chat isn't silent after [using Tool] lines.
+    if (assistantTexts.length === 0) {
+      if (interrupted) {
+        await publishFinalText(req.sessionId, '[interrupted by user]');
+      } else if (lastAssistantText) {
+        await publishFinalText(req.sessionId, lastAssistantText);
+        assistantTexts.push(lastAssistantText);
+      }
+    } else if (lastAssistantText) {
+      // Trailing text the SDK didn't wrap into a result event.
+      await publishFinalText(req.sessionId, lastAssistantText);
+      assistantTexts.push(lastAssistantText);
     }
     await publishTurnEnd(req.sessionId);
   }
 
-  return { text: lastAssistantText, sdkSessionId, interrupted };
+  // The workflow stores `text` as the assistant turn's content. With
+  // interleaving the activity may have produced several replies; join
+  // them so workflow history reflects what was sent to chat.
+  const combinedText = assistantTexts.join('\n\n');
+  return { text: combinedText, sdkSessionId, interrupted };
 }
 
 /**
@@ -239,6 +319,19 @@ export async function streamClaude(req: StreamReq): Promise<{ text: string; sdkS
  */
 export async function requestStreamCancel(req: { sessionId: string }): Promise<void> {
   await getRedis().publish(cancelChannel(req.sessionId), '1');
+}
+
+/**
+ * Forward a user message to the running streamClaude activity for the
+ * given session. The activity subscribes to this channel and pushes the
+ * message into its SDK query via streamInput, so the agent sees it
+ * mid-turn and interleaves it with whatever it's currently doing.
+ */
+export async function pushUserMessageToStream(req: {
+  sessionId: string;
+  msg: string;
+}): Promise<void> {
+  await getRedis().publish(inputChannel(req.sessionId), req.msg);
 }
 
 export type PersistTurnReq = {
