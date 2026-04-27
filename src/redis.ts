@@ -14,3 +14,13 @@ export async function closeRedis(): Promise<void> {
   await client.quit();
   client = null;
 }
+
+export function getSubscriberClient(): RedisClient {
+  // Pub/sub requires a dedicated connection — once a client SUBSCRIBEs it
+  // can't run normal commands. Caller is responsible for `.quit()`.
+  return getRedis().duplicate();
+}
+
+export function cancelChannel(sessionId: string): string {
+  return `sleet1213:cancel:${sessionId}`;
+}

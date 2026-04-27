@@ -1,7 +1,8 @@
 import { query } from '@anthropic-ai/claude-agent-sdk';
 import type { Options } from '@anthropic-ai/claude-agent-sdk';
-import { heartbeat } from '@temporalio/activity';
+import { heartbeat, Context } from '@temporalio/activity';
 import { publishDelta, publishThinking, publishToolCall, publishMessageStop, publishTurnEnd } from './publish.js';
+import { getRedis, getSubscriberClient, cancelChannel } from './redis.js';
 import {
   appendMessage,
   touchSession,
@@ -21,9 +22,11 @@ const MODEL = process.env.ANTHROPIC_MODEL ?? 'claude-sonnet-4-5';
  * the previous session so the agent has full conversation history without
  * us passing it manually.
  *
- * Returns { text, sdkSessionId } so the workflow can track the session.
+ * Returns { text, sdkSessionId, interrupted } so the workflow can track
+ * the session and know whether the turn was cut short by a new user
+ * message (allowing it to mark partial output appropriately).
  */
-export async function streamClaude(req: StreamReq): Promise<{ text: string; sdkSessionId: string }> {
+export async function streamClaude(req: StreamReq): Promise<{ text: string; sdkSessionId: string; interrupted: boolean }> {
   const memoryCtx = await loadMemoryContext(req.userId);
   const tedServer = createTedMcpServer(req.userId);
 
@@ -66,8 +69,25 @@ export async function streamClaude(req: StreamReq): Promise<{ text: string; sdkS
   const lastUserMsg = req.history.filter((m) => m.role === 'user').pop();
   const prompt = lastUserMsg?.content ?? '';
 
+  // Workflow-driven interrupt path: the workflow calls requestStreamCancel
+  // when a new user message arrives mid-turn, which publishes to a Redis
+  // channel this activity subscribes to. We use Redis (rather than Temporal
+  // CancellationScope) because Temporal's state machine errors out if a
+  // cancel command lands on an activity still in SCHEDULED state.
+  // Temporal-level cancellation (e.g. workflow close) is also wired so a
+  // shutting-down workflow still aborts cleanly.
+  const abort = new AbortController();
+  Context.current().cancellationSignal.addEventListener('abort', () => abort.abort());
+
+  const cancelSub = getSubscriberClient();
+  await cancelSub.subscribe(cancelChannel(req.sessionId));
+  cancelSub.on('message', (_chan, _msg) => {
+    abort.abort();
+  });
+
   const options: Options = {
     model: MODEL,
+    abortController: abort,
     cwd: process.env.CLAUDE_CWD ?? '/home/ubuntu/sleet1213',
     additionalDirectories: [REPO_SKILLS_DIR, LOCAL_SKILLS_DIR],
     ...(process.env.CLAUDE_CODE_PATH ? { pathToClaudeCodeExecutable: process.env.CLAUDE_CODE_PATH } : {}),
@@ -101,6 +121,7 @@ export async function streamClaude(req: StreamReq): Promise<{ text: string; sdkS
 
   let lastAssistantText = '';
   let sdkSessionId = req.sdkSessionId ?? '';
+  let interrupted = false;
 
   // If resume fails (stale session), retry without resume
   async function* runQuery() {
@@ -169,11 +190,34 @@ export async function streamClaude(req: StreamReq): Promise<{ text: string; sdkS
         }
       }
     }
+  } catch (err) {
+    if (abort.signal.aborted) {
+      // Workflow cancelled this turn because a new user message arrived.
+      // Swallow the abort and return whatever we'd already streamed so the
+      // workflow can mark it as interrupted and resume the SDK session
+      // with the new prompt.
+      interrupted = true;
+    } else {
+      throw err;
+    }
   } finally {
+    try { await cancelSub.quit(); } catch {}
     await publishTurnEnd(req.sessionId);
   }
 
-  return { text: lastAssistantText, sdkSessionId };
+  if (abort.signal.aborted) interrupted = true;
+
+  return { text: lastAssistantText, sdkSessionId, interrupted };
+}
+
+/**
+ * Publishes a cancel signal to the running streamClaude activity for the
+ * given session. The activity subscribes to this channel and aborts its
+ * SDK query on receipt. Fire-and-forget from the workflow's POV — completes
+ * as soon as Redis acks the publish.
+ */
+export async function requestStreamCancel(req: { sessionId: string }): Promise<void> {
+  await getRedis().publish(cancelChannel(req.sessionId), '1');
 }
 
 export type PersistTurnReq = {
