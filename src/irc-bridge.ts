@@ -166,18 +166,23 @@ async function streamToIrc(
   const url = `${cfg.webhookUrl}/sessions/${encodeURIComponent(cfg.sessionId)}/stream`;
   const headers = { 'X-User-ID': cfg.userId };
 
-  // We only post the agent's FINAL natural-language reply per turn — one
-  // chat message per turn, not one per LLM iteration. The activity emits
-  // a `final_text` event right before `turn_end` carrying the SDK result
-  // string. Intermediate `delta`, `thinking`, `tool_call`, and
-  // `message_stop` events stay in the SSE stream for other consumers
-  // (webhook UIs, debugging) but the IRC bridge ignores them.
-  //
-  // `pending` is a fallback: if the activity finished without emitting
-  // `final_text` (e.g. interrupted before any assistant text was set), we
-  // post whatever deltas we'd accumulated as a best effort.
+  // Chat output strategy:
+  //   * `tool_call`   → post `[using TOOL]` live (progress signal)
+  //   * `thinking`    → accumulate and flush per LLM iteration with
+  //                     `[thinking] ...` prefix on `message_stop`
+  //   * regular delta → DO NOT post per-iteration. The agent re-narrates
+  //                     its plan every iteration and that "replaying"
+  //                     loop was the noisy thing the operator hated. The
+  //                     activity emits a polished `final_text` event at
+  //                     the end carrying the SDK result string — that's
+  //                     the one we post as the final reply.
+  //   * `final_text`  → post the agent's final answer (one message)
+  //   * `pending` is a fallback: if no `final_text` arrived (e.g. the
+  //     turn was interrupted before any assistant text materialised),
+  //     post the accumulated deltas at `turn_end` as best effort.
+  let thinking = '';
   let pending = '';
-  let postedThisTurn = false;
+  let postedFinal = false;
   for await (const data of readSse(url, headers, signal)) {
     let event: { type: string; text?: string; name?: string };
     try {
@@ -187,23 +192,35 @@ async function streamToIrc(
     }
     if (event.type === 'delta' && typeof event.text === 'string') {
       pending += event.text;
+    } else if (event.type === 'thinking' && typeof event.text === 'string') {
+      thinking += event.text;
+    } else if (event.type === 'tool_call' && event.name) {
+      sendPrivmsg(`[using ${event.name}]`);
+    } else if (event.type === 'message_stop') {
+      // End of one LLM iteration. Flush accumulated thinking, drop the
+      // iteration's narrative text (avoids the "replay" feel).
+      if (thinking.trim()) {
+        for (const chunk of chunkForIrc(`[thinking] ${thinking}`)) {
+          sendPrivmsg(chunk);
+        }
+        thinking = '';
+      }
+      pending = '';
     } else if (event.type === 'final_text' && typeof event.text === 'string') {
       const final = event.text.trim();
       if (final) {
         for (const chunk of chunkForIrc(final)) sendPrivmsg(chunk);
-        postedThisTurn = true;
+        postedFinal = true;
       }
       pending = '';
     } else if (event.type === 'turn_end') {
-      if (!postedThisTurn && pending.trim()) {
+      if (!postedFinal && pending.trim()) {
         for (const chunk of chunkForIrc(pending)) sendPrivmsg(chunk);
       }
+      thinking = '';
       pending = '';
-      postedThisTurn = false;
+      postedFinal = false;
     }
-    // delta/thinking/tool_call/message_stop: deliberately ignored — see
-    // the comment above. The data is still in the SSE stream for other
-    // consumers, just not surfaced to the channel.
   }
 }
 
