@@ -230,15 +230,23 @@ async function main() {
     `[irc] connecting to ${cfg.server}:${cfg.port} as ${cfg.nick}, joining ${cfg.channel}`,
   );
 
-  // Prime the session before connecting to IRC — retry until the webhook is
-  // reachable so the bridge survives being started before the ted service.
+  // Wait for the webhook to be reachable before connecting to IRC — but
+  // do it via a side-effect-free GET, NOT a POST /message. The earlier
+  // implementation primed the session with `[irc bridge online ...]` as
+  // a synthetic user message, which the worker dutifully forwarded to
+  // the agent on every bridge restart, causing the agent to wake up and
+  // reply to a phantom request from "lokvolt". GET /sessions only needs
+  // the X-User-ID header we already have and has no side effects.
   for (let attempt = 1; ; attempt++) {
     try {
-      await postToWebhook(cfg, `[irc bridge online in ${cfg.channel}]`);
+      const res = await fetch(`${cfg.webhookUrl}/sessions`, {
+        headers: { 'X-User-ID': cfg.userId },
+      });
+      if (!res.ok) throw new Error(`status ${res.status}`);
       break;
     } catch (err) {
       console.error(
-        `[irc] prime attempt ${attempt} failed:`,
+        `[irc] webhook health check attempt ${attempt} failed:`,
         (err as Error).message,
       );
       await new Promise((r) => setTimeout(r, Math.min(attempt * 2000, 15000)));
