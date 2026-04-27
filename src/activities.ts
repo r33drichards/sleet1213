@@ -172,17 +172,29 @@ export async function streamClaude(req: StreamReq): Promise<{ text: string; sdkS
     }
   }
 
-  // If resume fails (stale session), retry without resume.
+  // Hold a live reference to the SDK Query so we can call q.close() when
+  // the grace timer fires. Closing the input iterator alone doesn't end
+  // the for-await loop — the Query keeps waiting for more streamInput
+  // and the activity (and its Redis subscribers) leaks until Temporal
+  // hits startToCloseTimeout.
+  let q = query({ prompt: userInputStream(), options });
+  const queryRef: { current: typeof q } = { current: q };
+  // If resume fails ("No conversation found"), retry without resume.
   async function* runQuery() {
     try {
-      yield* query({ prompt: userInputStream(), options });
+      yield* q;
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       if (msg.includes('No conversation found') && options.resume) {
         console.log(`[agent] stale session ${options.resume}, starting fresh`);
         delete options.resume;
         sdkSessionId = '';
-        yield* query({ prompt: userInputStream(), options });
+        // Restart the input stream from scratch so the SDK gets the
+        // initial prompt again on the fresh session.
+        pendingQueue.unshift({ kind: 'msg', text: initialPrompt });
+        q = query({ prompt: userInputStream(), options });
+        queryRef.current = q;
+        yield* q;
       } else {
         throw err;
       }
@@ -261,7 +273,12 @@ export async function streamClaude(req: StreamReq): Promise<{ text: string; sdkS
         if (pendingResults === 0 && pendingQueue.length === 0 && !abort.signal.aborted) {
           if (graceTimer) clearTimeout(graceTimer);
           graceTimer = setTimeout(() => {
-            enqueue({ kind: 'close' });
+            inputClosed = true;
+            // Wake the input generator so it observes inputClosed.
+            const f = wakeRef.fn; wakeRef.fn = null; if (f) f();
+            // Close the SDK query — without this, the for-await stays
+            // parked waiting for more streamInput forever.
+            try { queryRef.current.close(); } catch { /* already closed */ }
           }, INTERLEAVE_GRACE_MS);
         }
       }
@@ -283,6 +300,9 @@ export async function streamClaude(req: StreamReq): Promise<{ text: string; sdkS
     const wake = wakeRef.fn;
     wakeRef.fn = null;
     if (wake) wake();
+    // Make sure the SDK process shuts down even if we got here via a
+    // throw, abort, or finally-without-grace.
+    try { queryRef.current.close(); } catch {}
     try { await cancelSub.quit(); } catch {}
     try { await inputSub.quit(); } catch {}
     if (abort.signal.aborted) interrupted = true;
