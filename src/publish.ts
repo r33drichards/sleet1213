@@ -13,6 +13,7 @@ export type StreamEvent =
   | { type: 'thinking'; text: string }
   | { type: 'tool_call'; name: string }
   | { type: 'message_stop' }
+  | { type: 'final_text'; text: string }
   | { type: 'turn_end' };
 
 /**
@@ -72,6 +73,26 @@ export async function publishToolCall(sessionId: string, name: string): Promise<
 export async function publishMessageStop(sessionId: string): Promise<void> {
   const r = getRedis();
   const event: StreamEvent = { type: 'message_stop' };
+  await r.xadd(
+    streamKey(sessionId),
+    'MAXLEN',
+    '~',
+    String(STREAM_MAXLEN),
+    '*',
+    'data',
+    JSON.stringify(event),
+  );
+}
+
+/**
+ * Final natural-language reply for a turn — the SDK's `result` string,
+ * or the last accumulated assistant text on interrupt. The IRC bridge
+ * posts THIS to chat as the single per-turn reply, ignoring intermediate
+ * delta / tool_call / message_stop noise.
+ */
+export async function publishFinalText(sessionId: string, text: string): Promise<void> {
+  const r = getRedis();
+  const event: StreamEvent = { type: 'final_text', text };
   await r.xadd(
     streamKey(sessionId),
     'MAXLEN',

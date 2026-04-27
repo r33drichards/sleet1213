@@ -1,7 +1,7 @@
 import { query } from '@anthropic-ai/claude-agent-sdk';
 import type { Options } from '@anthropic-ai/claude-agent-sdk';
 import { heartbeat, Context } from '@temporalio/activity';
-import { publishDelta, publishThinking, publishToolCall, publishMessageStop, publishTurnEnd } from './publish.js';
+import { publishDelta, publishThinking, publishToolCall, publishMessageStop, publishFinalText, publishTurnEnd } from './publish.js';
 import { getRedis, getSubscriberClient, cancelChannel } from './redis.js';
 import {
   appendMessage,
@@ -202,6 +202,9 @@ export async function streamClaude(req: StreamReq): Promise<{ text: string; sdkS
     }
   } finally {
     try { await cancelSub.quit(); } catch {}
+    if (lastAssistantText) {
+      await publishFinalText(req.sessionId, lastAssistantText);
+    }
     await publishTurnEnd(req.sessionId);
   }
 
