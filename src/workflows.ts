@@ -27,12 +27,10 @@ const { streamClaude, persistTurn, generateTitle } = proxyActivities<
   retry: { maximumAttempts: 1 },
 });
 
-const { requestStreamCancel } = proxyActivities<typeof activities>({
-  // Tiny Redis publish — fail fast, no retries; if cancel doesn't reach the
-  // streamer the worst case is the turn finishes naturally.
-  startToCloseTimeout: '5 seconds',
-  retry: { maximumAttempts: 1 },
-});
+// requestStreamCancel intentionally not proxied here — automatic cancel
+// is disabled in steer mode. The activity remains subscribed to the
+// Redis cancel channel, so an out-of-band publisher (e.g. a future
+// "stop" keyword handler or admin RPC) can still trigger an interrupt.
 
 const HISTORY_LENGTH_LIMIT = 2000;
 
@@ -66,36 +64,21 @@ export async function chatSession(
       await persistTurn({ sessionId, role: 'user', content: userTurn, userId });
     }
 
-    // Run the activity, with a parallel watcher that fires a Redis-backed
-    // cancel when a new user message lands mid-turn. The activity then
-    // aborts its SDK query and returns whatever partial text it had. We
-    // don't use Temporal CancellationScope here because cancelling an
-    // activity in SCHEDULED state crashes Temporal's workflow state
-    // machine.
-    let activityDone = false;
-    const activityPromise = (async () => {
-      try {
-        return await streamClaude({
-          sessionId,
-          history,
-          userId,
-          sdkSessionId: sdkSessionId || undefined,
-        });
-      } finally {
-        activityDone = true;
-      }
-    })();
-
-    const watcherPromise = (async () => {
-      await condition(() => inbox.length > 0 || activityDone);
-      if (activityDone) return;
-      // New message arrived first — tell the streamer to abort. Fire and
-      // forget; if the publish fails the turn just finishes naturally.
-      await requestStreamCancel({ sessionId });
-    })();
-
-    const result = await activityPromise;
-    await watcherPromise; // resolve cleanly so no orphan promise
+    // "Steer" queue mode (per openclaw's queue-policy.ts:17): new user
+    // messages that arrive while this turn is running do NOT cancel the
+    // active run — they accumulate in `inbox` via userMessageSignal and
+    // get drained as the next user turn after this one finishes, with
+    // SDK session resume carrying context across. This avoids the rapid-
+    // fire-commands-cancel-each-other footgun. Explicit interrupt is
+    // still possible by publishing to the Redis cancel channel directly
+    // (the activity subscribes), so a future "stop"/"cancel" keyword
+    // path or admin RPC can wire one up without further changes here.
+    const result = await streamClaude({
+      sessionId,
+      history,
+      userId,
+      sdkSessionId: sdkSessionId || undefined,
+    });
 
     sdkSessionId = result.sdkSessionId;
     let assistantText = result.text;
