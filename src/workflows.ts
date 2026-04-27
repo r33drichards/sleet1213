@@ -13,11 +13,18 @@ import type { Msg } from './types.js';
 const { streamClaude, persistTurn, generateTitle } = proxyActivities<
   typeof activities
 >({
-  // 5 min cap is generous; the interrupt path covers genuinely long runs
-  // by letting the user redirect mid-turn.
-  startToCloseTimeout: '5 minutes',
-  heartbeatTimeout: '60 seconds',
-  retry: { maximumAttempts: 3 },
+  // Multi-step Minecraft tasks (e.g. crossing the basalt bridge under
+  // baritone) routinely take 5-15 min. The interrupt path covers user-
+  // initiated stops; this cap is just the runaway-protection ceiling.
+  // The activity heartbeats every 20s on a wall-clock tick (see
+  // streamClaude) so a 3 min heartbeat budget is plenty of headroom.
+  startToCloseTimeout: '30 minutes',
+  heartbeatTimeout: '3 minutes',
+  // Only retry on truly transient failures. We do NOT want a retry on
+  // heartbeat-timeout — that would hand the agent the same prompt twice
+  // via SDK session resume and the agent concludes "the user is
+  // repeating their request".
+  retry: { maximumAttempts: 1 },
 });
 
 const { requestStreamCancel } = proxyActivities<typeof activities>({

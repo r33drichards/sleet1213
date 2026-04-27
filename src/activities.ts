@@ -140,6 +140,18 @@ export async function streamClaude(req: StreamReq): Promise<{ text: string; sdkS
     }
   }
 
+  // Wall-clock heartbeat tick. The for-await below blocks for the whole
+  // duration of any tool call the SDK is running (e.g. a baritone goto
+  // that takes 90s to cross a bridge), so without a periodic tick the
+  // activity wouldn't heartbeat for that whole window, Temporal would
+  // declare it dead at heartbeatTimeout=60s, and retry the activity —
+  // which re-passes the same user prompt with the same sdkSessionId, so
+  // the agent ends up seeing the user's message twice via session resume
+  // and concludes "the user is repeating the request".
+  const hbTick = setInterval(() => {
+    try { heartbeat(); } catch { /* activity may be already gone */ }
+  }, 20_000);
+
   try {
     for await (const message of runQuery()) {
       heartbeat();
@@ -201,6 +213,7 @@ export async function streamClaude(req: StreamReq): Promise<{ text: string; sdkS
       throw err;
     }
   } finally {
+    clearInterval(hbTick);
     try { await cancelSub.quit(); } catch {}
     if (lastAssistantText) {
       await publishFinalText(req.sessionId, lastAssistantText);
