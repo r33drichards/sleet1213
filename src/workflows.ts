@@ -59,21 +59,13 @@ export async function chatSession(
   seedHistory: Msg[] = [],
   userId: string = '',
   seedSdkSessionId: string = '',
-  _legacyAgentConfig?: AgentConfig,
-  seedSdkSessionMap: Record<string, string> = {},
 ): Promise<void> {
   type InboxItem = { msg: string; agentConfig?: AgentConfig };
   const inbox: InboxItem[] = [];
   const history: Msg[] = [...seedHistory];
   let closed = false;
   let titleGenerated = seedHistory.length > 0;
-  // Track SDK session IDs per agent config fingerprint. Different tool
-  // sets need separate SDK sessions because `resume` carries forward the
-  // original tool restrictions. Seed from continueAsNew or legacy single ID.
-  const sdkSessionMap: Record<string, string> = { ...seedSdkSessionMap };
-  if (seedSdkSessionId && !sdkSessionMap['default']) {
-    sdkSessionMap['default'] = seedSdkSessionId;
-  }
+  let sdkSessionId = seedSdkSessionId;
 
   setHandler(userMessageSignal, (msg: string, agentConfig?: AgentConfig) => {
     inbox.push({ msg, agentConfig });
