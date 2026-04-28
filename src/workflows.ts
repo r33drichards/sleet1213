@@ -60,15 +60,17 @@ export async function chatSession(
   userId: string = '',
   seedSdkSessionId: string = '',
 ): Promise<void> {
-  type InboxItem = { msg: string; agentConfig?: AgentConfig };
+  type InboxItem = { msg: string; agentConfig?: AgentConfig; userId?: string };
   const inbox: InboxItem[] = [];
   const history: Msg[] = [...seedHistory];
   let closed = false;
   let titleGenerated = seedHistory.length > 0;
+  // Single SDK session shared by every turn in this Twitch session.
+  // Per-Query tool overrides come from the inbox item's agentConfig.
   let sdkSessionId = seedSdkSessionId;
 
-  setHandler(userMessageSignal, (msg: string, agentConfig?: AgentConfig) => {
-    inbox.push({ msg, agentConfig });
+  setHandler(userMessageSignal, (msg: string, agentConfig?: AgentConfig, signalUserId?: string) => {
+    inbox.push({ msg, agentConfig, userId: signalUserId });
   });
   setHandler(closeSignal, () => {
     closed = true;
@@ -79,20 +81,17 @@ export async function chatSession(
     await condition(() => inbox.length > 0 || closed);
     if (closed) break;
 
-    // Drain the FIRST queued message; the activity will be started with
-    // it as the initial prompt. Any subsequent messages that arrive
-    // during the activity are forwarded via Redis to streamInput so the
-    // agent sees them mid-turn (true interleaving — not interrupt, not
-    // queue-after-completion).
     const firstItem = inbox.shift()!;
-    history.push({ role: 'user', content: firstItem.msg });
-    await persistTurn({ sessionId, role: 'user', content: firstItem.msg, userId });
-
-    // Look up the SDK session for this agent config's tool fingerprint.
-    // Different tool sets get separate SDK sessions so `tools` restrictions
-    // are enforced fresh instead of being inherited from a prior resume.
     const cfgKey = agentConfigKey(firstItem.agentConfig);
-    const sdkSessionId = sdkSessionMap[cfgKey] ?? '';
+    const turnUserId = firstItem.userId || userId;
+
+    history.push({ role: 'user', content: firstItem.msg });
+    await persistTurn({
+      sessionId,
+      role: 'user',
+      content: firstItem.msg,
+      userId: turnUserId,
+    });
 
     let activityDone = false;
     const activityPromise = (async () => {
@@ -100,7 +99,7 @@ export async function chatSession(
         return await streamClaude({
           sessionId,
           history,
-          userId,
+          userId: turnUserId,
           sdkSessionId: sdkSessionId || undefined,
           agentConfig: firstItem.agentConfig,
         });
@@ -109,16 +108,32 @@ export async function chatSession(
       }
     })();
 
-    // Forwarder: while the activity runs, push each new inbox message
-    // into the running SDK query via Redis.
+    // Forwarder: only interleave SAME-cfgKey messages into the running
+    // Query. Different-cfgKey messages would land in a Query with the
+    // wrong tool set (a public msg interleaved into an admin turn would
+    // get admin tools), so they wait for the next loop iteration.
     const forwarderPromise = (async () => {
       while (!activityDone) {
-        await condition(() => inbox.length > 0 || activityDone);
+        await condition(
+          () =>
+            inbox.some((i) => agentConfigKey(i.agentConfig) === cfgKey) ||
+            activityDone,
+        );
         if (activityDone) return;
-        while (inbox.length > 0 && !activityDone) {
-          const item = inbox.shift()!;
+        let idx = 0;
+        while (idx < inbox.length && !activityDone) {
+          if (agentConfigKey(inbox[idx].agentConfig) !== cfgKey) {
+            idx++;
+            continue;
+          }
+          const item = inbox.splice(idx, 1)[0];
           history.push({ role: 'user', content: item.msg });
-          await persistTurn({ sessionId, role: 'user', content: item.msg, userId });
+          await persistTurn({
+            sessionId,
+            role: 'user',
+            content: item.msg,
+            userId: turnUserId,
+          });
           await pushUserMessageToStream({ sessionId, msg: item.msg });
         }
       }
@@ -127,29 +142,29 @@ export async function chatSession(
     const result = await activityPromise;
     await forwarderPromise;
 
-    // Store the returned SDK session ID under this config's key.
-    if (result.sdkSessionId) {
-      sdkSessionMap[cfgKey] = result.sdkSessionId;
-    }
-    // The activity persists each per-result assistant message itself
-    // (because in interleave mode there can be multiple per turn). We
-    // only mirror the joined text into in-memory `history` so the
-    // workflow's transcriptQuery and continueAsNew snapshot stay in
-    // sync with the DB.
+    sdkSessionId = result.sdkSessionId;
     if (result.text) {
       history.push({ role: 'assistant', content: result.text });
     } else if (result.interrupted) {
       history.push({ role: 'assistant', content: '[interrupted by user]' });
     }
-    const userTurn = firstItem.msg;
 
-    if (!titleGenerated && userTurn !== null) {
+    if (!titleGenerated) {
       titleGenerated = true;
-      await generateTitle({ sessionId, userMessage: userTurn, userId });
+      await generateTitle({
+        sessionId,
+        userMessage: firstItem.msg,
+        userId: turnUserId,
+      });
     }
 
     if (workflowInfo().historyLength > HISTORY_LENGTH_LIMIT) {
-      await continueAsNew<typeof chatSession>(sessionId, history, userId, '', undefined, sdkSessionMap);
+      await continueAsNew<typeof chatSession>(
+        sessionId,
+        history,
+        userId,
+        sdkSessionId,
+      );
     }
   }
 }
