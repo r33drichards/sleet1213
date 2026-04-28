@@ -416,18 +416,18 @@ async function main() {
     process.exit(0);
   });
 
-  // Collect all (sessionId, userId) pairs to stream from.
-  // With nick groups, each group has its own session; without, just the
-  // default cfg.sessionId / cfg.userId.
+  // Collect unique sessions to stream from. Deduplicate by sessionId —
+  // when multiple groups share a session (shared-session model), we only
+  // want ONE SSE stream per session, otherwise every reply gets echoed
+  // once per group.
   type StreamTarget = { sessionId: string; userId: string };
   const streamTargets: StreamTarget[] = [];
 
   if (cfg.nickGroups) {
     const seen = new Set<string>();
     for (const g of cfg.nickGroups.groups) {
-      const key = `${g.userId}:${g.sessionId}`;
-      if (!seen.has(key)) {
-        seen.add(key);
+      if (!seen.has(g.sessionId)) {
+        seen.add(g.sessionId);
         streamTargets.push({ sessionId: g.sessionId, userId: g.userId });
       }
     }

@@ -40,20 +40,40 @@ const { pushUserMessageToStream } = proxyActivities<typeof activities>({
 
 const HISTORY_LENGTH_LIMIT = 2000;
 
+/**
+ * Compute a stable fingerprint for an AgentConfig so we can maintain
+ * separate SDK sessions per tool-set. Different tool configs MUST NOT
+ * share an SDK session because `resume` carries forward the original
+ * tool restrictions.
+ */
+function agentConfigKey(cfg?: AgentConfig): string {
+  if (!cfg) return 'default';
+  // Sort tools for stability, include plugins flag and disallowed
+  const tools = [...(cfg.allowedTools ?? [])].sort().join(',');
+  const blocked = [...(cfg.disallowedTools ?? [])].sort().join(',');
+  return `${tools}|blocked=${blocked}|plugins=${cfg.includePlugins ?? false}`;
+}
+
 export async function chatSession(
   sessionId: string,
   seedHistory: Msg[] = [],
   userId: string = '',
   seedSdkSessionId: string = '',
   _legacyAgentConfig?: AgentConfig,
+  seedSdkSessionMap: Record<string, string> = {},
 ): Promise<void> {
   type InboxItem = { msg: string; agentConfig?: AgentConfig };
   const inbox: InboxItem[] = [];
   const history: Msg[] = [...seedHistory];
   let closed = false;
   let titleGenerated = seedHistory.length > 0;
-  // Track the SDK session ID for multi-turn context via resume
-  let sdkSessionId = seedSdkSessionId;
+  // Track SDK session IDs per agent config fingerprint. Different tool
+  // sets need separate SDK sessions because `resume` carries forward the
+  // original tool restrictions. Seed from continueAsNew or legacy single ID.
+  const sdkSessionMap: Record<string, string> = { ...seedSdkSessionMap };
+  if (seedSdkSessionId && !sdkSessionMap['default']) {
+    sdkSessionMap['default'] = seedSdkSessionId;
+  }
 
   setHandler(userMessageSignal, (msg: string, agentConfig?: AgentConfig) => {
     inbox.push({ msg, agentConfig });
@@ -75,6 +95,12 @@ export async function chatSession(
     const firstItem = inbox.shift()!;
     history.push({ role: 'user', content: firstItem.msg });
     await persistTurn({ sessionId, role: 'user', content: firstItem.msg, userId });
+
+    // Look up the SDK session for this agent config's tool fingerprint.
+    // Different tool sets get separate SDK sessions so `tools` restrictions
+    // are enforced fresh instead of being inherited from a prior resume.
+    const cfgKey = agentConfigKey(firstItem.agentConfig);
+    const sdkSessionId = sdkSessionMap[cfgKey] ?? '';
 
     let activityDone = false;
     const activityPromise = (async () => {
@@ -109,7 +135,10 @@ export async function chatSession(
     const result = await activityPromise;
     await forwarderPromise;
 
-    sdkSessionId = result.sdkSessionId;
+    // Store the returned SDK session ID under this config's key.
+    if (result.sdkSessionId) {
+      sdkSessionMap[cfgKey] = result.sdkSessionId;
+    }
     // The activity persists each per-result assistant message itself
     // (because in interleave mode there can be multiple per turn). We
     // only mirror the joined text into in-memory `history` so the
@@ -128,7 +157,7 @@ export async function chatSession(
     }
 
     if (workflowInfo().historyLength > HISTORY_LENGTH_LIMIT) {
-      await continueAsNew<typeof chatSession>(sessionId, history, userId, sdkSessionId);
+      await continueAsNew<typeof chatSession>(sessionId, history, userId, '', undefined, sdkSessionMap);
     }
   }
 }

@@ -36,7 +36,8 @@ Full system access — can drive the EC2 host, systemd services, build code, and
 Restricted to MCP tools only — can use `mcp-js` to edit and create skills, schedules, memory, and interact with Minecraft:
 
 - **Built-in tools:** None (only `mcp__*` pattern)
-- **MCP tools:** `mcp-js` (JavaScript runtime for creating skills, managing schedules, memory CRUD, and Minecraft RPC interaction)
+- **MCP tools:** `mcp-js` (JavaScript runtime for creating skills, managing schedules, memory CRUD, and Minecraft RPC interaction via btone bridge)
+- **Minecraft RPC:** Inside mcp-js, `mcp.listTools('btone')` discovers all bot RPC methods; `mcp.callTool('btone', 'player_state', {})` calls them. The btone-mcp-bridge (`/home/ubuntu/mca-src/bin/btone-mcp-bridge.mjs`) auto-generates MCP tools from the OpenRPC spec at runtime.
 - **Plugins:** Disabled
 - **Session:** `irc-sleet1213-public`
 

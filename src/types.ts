@@ -12,6 +12,8 @@ export type Msg = {
 export type AgentConfig = {
   /** Tool names the agent is allowed to use (e.g. ["Read","Bash","mcp__*"]) */
   allowedTools: string[];
+  /** Tool names explicitly blocked (e.g. ["mcp__ted__mcp_add"]) — takes precedence over allowedTools */
+  disallowedTools?: string[];
   /** Whether to include the REPO and LOCAL plugin/skill directories */
   includePlugins: boolean;
   /** Whether to load user-configured MCP servers from the DB */

@@ -139,7 +139,7 @@ export async function streamClaude(req: StreamReq): Promise<{ text: string; sdkS
     plugins,
     tools: agentCfg.allowedTools,
     allowedTools: agentCfg.allowedTools,
-    disallowedTools: [],
+    disallowedTools: agentCfg.disallowedTools ?? [],
     permissionMode: (agentCfg.permissionMode ?? 'bypassPermissions') as any,
     allowDangerouslySkipPermissions: true,
     settingSources: ['project'],
