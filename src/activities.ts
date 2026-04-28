@@ -91,10 +91,11 @@ export async function streamClaude(req: StreamReq): Promise<{ text: string; sdkS
   if (agentCfg.systemPromptSuffix) systemParts.push(agentCfg.systemPromptSuffix);
   if (req.sdkSessionId) {
     systemParts.push(
-      'Note: this conversation transcript may contain prior tool calls ' +
-      '(e.g. Bash, Edit) that were available to a different participant ' +
-      'and are NOT registered in this turn. Do not attempt to invoke ' +
-      'tools that are not in your current tool list.',
+      'Note: this conversation transcript may contain prior tool_use blocks ' +
+      '(e.g. Bash, Edit, or mcp__* tools) that were available to a different ' +
+      'participant and are NOT registered in this turn. Only invoke tools ' +
+      'that appear in your current tool list; do not attempt to call any ' +
+      'tool you see referenced in transcript history but not in your current tools.',
     );
   }
 
