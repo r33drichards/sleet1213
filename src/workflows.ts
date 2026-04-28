@@ -142,7 +142,9 @@ export async function chatSession(
     const result = await activityPromise;
     await forwarderPromise;
 
-    sdkSessionId = result.sdkSessionId;
+    if (result.sdkSessionId) {
+      sdkSessionId = result.sdkSessionId;
+    }
     if (result.text) {
       history.push({ role: 'assistant', content: result.text });
     } else if (result.interrupted) {
