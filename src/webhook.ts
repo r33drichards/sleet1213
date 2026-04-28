@@ -57,7 +57,7 @@ export function makeApp(deps: {
     await deps.signalWithStart(chatSession, {
       workflowId: `chat:${body.sessionId}`,
       taskQueue: deps.taskQueue,
-      args: [body.sessionId, [], userId],
+      args: [body.sessionId, [], userId, /* seedSdkSessionId */ ''],
       signal: userMessageSignal,
       signalArgs: [body.msg, agentConfig],
     });
