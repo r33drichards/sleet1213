@@ -45,17 +45,18 @@ export async function chatSession(
   seedHistory: Msg[] = [],
   userId: string = '',
   seedSdkSessionId: string = '',
-  agentConfig?: AgentConfig,
+  _legacyAgentConfig?: AgentConfig,
 ): Promise<void> {
-  const inbox: string[] = [];
+  type InboxItem = { msg: string; agentConfig?: AgentConfig };
+  const inbox: InboxItem[] = [];
   const history: Msg[] = [...seedHistory];
   let closed = false;
   let titleGenerated = seedHistory.length > 0;
   // Track the SDK session ID for multi-turn context via resume
   let sdkSessionId = seedSdkSessionId;
 
-  setHandler(userMessageSignal, (msg: string) => {
-    inbox.push(msg);
+  setHandler(userMessageSignal, (msg: string, agentConfig?: AgentConfig) => {
+    inbox.push({ msg, agentConfig });
   });
   setHandler(closeSignal, () => {
     closed = true;
@@ -71,9 +72,9 @@ export async function chatSession(
     // during the activity are forwarded via Redis to streamInput so the
     // agent sees them mid-turn (true interleaving — not interrupt, not
     // queue-after-completion).
-    const firstMsg = inbox.shift()!;
-    history.push({ role: 'user', content: firstMsg });
-    await persistTurn({ sessionId, role: 'user', content: firstMsg, userId });
+    const firstItem = inbox.shift()!;
+    history.push({ role: 'user', content: firstItem.msg });
+    await persistTurn({ sessionId, role: 'user', content: firstItem.msg, userId });
 
     let activityDone = false;
     const activityPromise = (async () => {
@@ -83,7 +84,7 @@ export async function chatSession(
           history,
           userId,
           sdkSessionId: sdkSessionId || undefined,
-          agentConfig,
+          agentConfig: firstItem.agentConfig,
         });
       } finally {
         activityDone = true;
@@ -97,10 +98,10 @@ export async function chatSession(
         await condition(() => inbox.length > 0 || activityDone);
         if (activityDone) return;
         while (inbox.length > 0 && !activityDone) {
-          const m = inbox.shift()!;
-          history.push({ role: 'user', content: m });
-          await persistTurn({ sessionId, role: 'user', content: m, userId });
-          await pushUserMessageToStream({ sessionId, msg: m });
+          const item = inbox.shift()!;
+          history.push({ role: 'user', content: item.msg });
+          await persistTurn({ sessionId, role: 'user', content: item.msg, userId });
+          await pushUserMessageToStream({ sessionId, msg: item.msg });
         }
       }
     })();
@@ -119,7 +120,7 @@ export async function chatSession(
     } else if (result.interrupted) {
       history.push({ role: 'assistant', content: '[interrupted by user]' });
     }
-    const userTurn = firstMsg;
+    const userTurn = firstItem.msg;
 
     if (!titleGenerated && userTurn !== null) {
       titleGenerated = true;
@@ -127,7 +128,7 @@ export async function chatSession(
     }
 
     if (workflowInfo().historyLength > HISTORY_LENGTH_LIMIT) {
-      await continueAsNew<typeof chatSession>(sessionId, history, userId, sdkSessionId, agentConfig);
+      await continueAsNew<typeof chatSession>(sessionId, history, userId, sdkSessionId);
     }
   }
 }

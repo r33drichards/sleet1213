@@ -297,12 +297,15 @@ async function main() {
   // the agent on every bridge restart, causing the agent to wake up and
   // reply to a phantom request from "lokvolt". GET /sessions only needs
   // the X-User-ID header we already have and has no side effects.
+  // Wait for the webhook to be reachable. Use a GET on the messages
+  // endpoint (returns empty 401 without X-User-ID but proves the server
+  // is up). The old /sessions endpoint was removed with the web frontend.
   for (let attempt = 1; ; attempt++) {
     try {
-      const res = await fetch(`${cfg.webhookUrl}/sessions`, {
+      const res = await fetch(`${cfg.webhookUrl}/sessions/_health/messages`, {
         headers: { 'X-User-ID': cfg.userId },
       });
-      if (!res.ok) throw new Error(`status ${res.status}`);
+      // Any response (even 404) means the server is up.
       break;
     } catch (err) {
       console.error(

@@ -1,6 +1,6 @@
 import { defineSignal, defineQuery } from '@temporalio/workflow';
-import type { Msg } from './types.js';
+import type { AgentConfig, Msg } from './types.js';
 
-export const userMessageSignal = defineSignal<[string]>('userMessage');
+export const userMessageSignal = defineSignal<[string, AgentConfig?]>('userMessage');
 export const closeSignal       = defineSignal<[]>('close');
 export const transcriptQuery   = defineQuery<Msg[]>('transcript');

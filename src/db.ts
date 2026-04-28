@@ -180,6 +180,15 @@ export async function sessionBelongsTo(
   return rows[0]?.exists ?? false;
 }
 
+/** Check if a session exists (no ownership check). */
+export async function sessionExists(sessionId: string): Promise<boolean> {
+  const { rows } = await getPool().query<{ exists: boolean }>(
+    'SELECT EXISTS(SELECT 1 FROM sessions WHERE id = $1) AS exists',
+    [sessionId],
+  );
+  return rows[0]?.exists ?? false;
+}
+
 export async function closePool(): Promise<void> {
   if (!pool) return;
   await pool.end();

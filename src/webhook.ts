@@ -8,7 +8,7 @@ import {
   ensureSchema,
   getMessages,
   createSession,
-  sessionBelongsTo,
+  sessionExists,
 } from './db.js';
 import { subscribeDeltas } from './publish.js';
 
@@ -42,47 +42,37 @@ export function makeApp(deps: {
       return c.json({ error: 'sessionId and msg required' }, 400);
     }
 
-    const exists = await sessionBelongsTo(body.sessionId, userId);
-    if (!exists) {
+    // Shared session — any user can post to any session. Create the
+    // session row if it doesn't exist yet (using this user as the
+    // initial creator, but ownership isn't enforced).
+    if (!(await sessionExists(body.sessionId))) {
       await createSession(userId, body.sessionId);
-      const nowOwned = await sessionBelongsTo(body.sessionId, userId);
-      if (!nowOwned) {
-        return c.json({ error: 'session belongs to another user' }, 403);
-      }
     }
 
     // agentConfig is optional — the IRC bridge passes it when nick groups
-    // are configured. The workflow threads it through to the activity so
-    // different groups get different agent capabilities.
+    // are configured. It's carried per-message in the signal so different
+    // users get different agent capabilities within the same session.
     const agentConfig = body.agentConfig ?? undefined;
 
     await deps.signalWithStart(chatSession, {
       workflowId: `chat:${body.sessionId}`,
       taskQueue: deps.taskQueue,
-      args: [body.sessionId, [], userId, '', agentConfig],
+      args: [body.sessionId, [], userId],
       signal: userMessageSignal,
-      signalArgs: [body.msg],
+      signalArgs: [body.msg, agentConfig],
     });
 
     return c.json({ ok: true });
   });
 
   app.get('/sessions/:sessionId/messages', async (c) => {
-    const userId = c.get('userId');
     const sessionId = c.req.param('sessionId');
-    if (!(await sessionBelongsTo(sessionId, userId))) {
-      return c.json({ error: 'not found' }, 404);
-    }
-    const messages = await getMessages(sessionId, userId);
+    const messages = await getMessages(sessionId);
     return c.json({ sessionId, messages });
   });
 
   app.get('/sessions/:sessionId/stream', async (c) => {
-    const userId = c.get('userId');
     const sessionId = c.req.param('sessionId');
-    if (!(await sessionBelongsTo(sessionId, userId))) {
-      return c.json({ error: 'not found' }, 404);
-    }
     const lastEventId = c.req.header('Last-Event-ID');
     const fromQuery = c.req.query('from');
     const from = lastEventId ?? fromQuery ?? '$';
