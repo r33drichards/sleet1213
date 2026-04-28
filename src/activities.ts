@@ -89,6 +89,14 @@ export async function streamClaude(req: StreamReq): Promise<{ text: string; sdkS
   }
   if (memoryCtx) systemParts.push(memoryCtx);
   if (agentCfg.systemPromptSuffix) systemParts.push(agentCfg.systemPromptSuffix);
+  if (req.sdkSessionId) {
+    systemParts.push(
+      'Note: this conversation transcript may contain prior tool calls ' +
+      '(e.g. Bash, Edit) that were available to a different participant ' +
+      'and are NOT registered in this turn. Do not attempt to invoke ' +
+      'tools that are not in your current tool list.',
+    );
+  }
 
   const lastUserMsg = req.history.filter((m) => m.role === 'user').pop();
   const initialPrompt = lastUserMsg?.content ?? '';
