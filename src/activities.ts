@@ -11,7 +11,8 @@ import {
   listEnabledMcpServers,
 } from './db.js';
 import { createTedMcpServer } from './memory-mcp.js';
-import type { Role, StreamReq } from './types.js';
+import type { AgentConfig, Role, StreamReq } from './types.js';
+import { DEFAULT_ADMIN_CONFIG } from './nick-groups.js';
 
 const MODEL = process.env.ANTHROPIC_MODEL ?? 'claude-sonnet-4-5';
 
@@ -27,17 +28,36 @@ const MODEL = process.env.ANTHROPIC_MODEL ?? 'claude-sonnet-4-5';
  * message (allowing it to mark partial output appropriately).
  */
 export async function streamClaude(req: StreamReq): Promise<{ text: string; sdkSessionId: string; interrupted: boolean }> {
-  const memoryCtx = await loadMemoryContext(req.userId);
+  // Resolve agent config — use per-group config if provided, else default admin
+  const agentCfg: AgentConfig = req.agentConfig ?? DEFAULT_ADMIN_CONFIG;
+
+  const memoryCtx = agentCfg.includeUserMcpServers
+    ? await loadMemoryContext(req.userId)
+    : '';
   const tedServer = createTedMcpServer(req.userId);
 
-  // Build MCP servers from user's DB config
-  const dbServers = await listEnabledMcpServers(req.userId);
+  // Build MCP servers from user's DB config (only if the group allows it)
   const userMcpServers: Record<string, any> = {};
-  for (const s of dbServers) {
-    if (s.transport === 'stdio' && s.command) {
-      userMcpServers[s.name] = { command: s.command, args: s.args ?? [] };
-    } else if (s.url) {
-      userMcpServers[s.name] = { type: 'http', url: s.url };
+  if (agentCfg.includeUserMcpServers) {
+    const dbServers = await listEnabledMcpServers(req.userId);
+    for (const s of dbServers) {
+      if (s.transport === 'stdio' && s.command) {
+        userMcpServers[s.name] = { command: s.command, args: s.args ?? [] };
+      } else if (s.url) {
+        userMcpServers[s.name] = { type: 'http', url: s.url };
+      }
+    }
+  }
+
+  // Build extra MCP servers from the group config
+  const extraMcpServers: Record<string, any> = {};
+  if (agentCfg.extraMcpServers) {
+    for (const [name, srv] of Object.entries(agentCfg.extraMcpServers)) {
+      if (srv.command) {
+        extraMcpServers[name] = { command: srv.command, args: srv.args ?? [] };
+      } else if (srv.url) {
+        extraMcpServers[name] = { type: srv.type ?? 'http', url: srv.url };
+      }
     }
   }
 
@@ -57,14 +77,18 @@ export async function streamClaude(req: StreamReq): Promise<{ text: string; sdkS
   const REPO_SKILLS_DIR = `${REPO_PLUGIN_DIR}/skills`;
   const LOCAL_SKILLS_DIR = `${LOCAL_PLUGIN_DIR}/skills`;
 
-  const systemParts: string[] = [
-    `You have two skill directories overlaid:\n` +
-      `  - REPO (read-only): ${REPO_SKILLS_DIR}/ — core skills checked into github.com/r33drichards/sleet1213. To edit these, edit the repo on a workstation, push to master, and run \`git pull\` + \`systemctl --user restart sleet1213-worker\` on this host.\n` +
-      `  - LOCAL (writable): ${LOCAL_SKILLS_DIR}/ — your scratch dir. New skills you invent at runtime go here. Use the Write tool to create \`${LOCAL_SKILLS_DIR}/<name>/SKILL.md\` with YAML front matter (name + description), then a markdown body. Skills are reread per turn — no restart needed for skill changes.\n` +
-      `Pick LOCAL by default for any new skill. Use REPO only for core capabilities you'd want every future deployment to inherit, and even then go via the github repo, not direct edits.`,
-    `You can also add and remove MCP tool servers using mcp__ted__mcp_add, mcp__ted__mcp_list, mcp__ted__mcp_remove. New servers become available on the next turn.`,
-  ];
+  const systemParts: string[] = [];
+  if (agentCfg.includePlugins) {
+    systemParts.push(
+      `You have two skill directories overlaid:\n` +
+        `  - REPO (read-only): ${REPO_SKILLS_DIR}/ — core skills checked into github.com/r33drichards/sleet1213. To edit these, edit the repo on a workstation, push to master, and run \`git pull\` + \`systemctl --user restart sleet1213-worker\` on this host.\n` +
+        `  - LOCAL (writable): ${LOCAL_SKILLS_DIR}/ — your scratch dir. New skills you invent at runtime go here. Use the Write tool to create \`${LOCAL_SKILLS_DIR}/<name>/SKILL.md\` with YAML front matter (name + description), then a markdown body. Skills are reread per turn — no restart needed for skill changes.\n` +
+        `Pick LOCAL by default for any new skill. Use REPO only for core capabilities you'd want every future deployment to inherit, and even then go via the github repo, not direct edits.`,
+      `You can also add and remove MCP tool servers using mcp__ted__mcp_add, mcp__ted__mcp_list, mcp__ted__mcp_remove. New servers become available on the next turn.`,
+    );
+  }
   if (memoryCtx) systemParts.push(memoryCtx);
+  if (agentCfg.systemPromptSuffix) systemParts.push(agentCfg.systemPromptSuffix);
 
   const lastUserMsg = req.history.filter((m) => m.role === 'user').pop();
   const initialPrompt = lastUserMsg?.content ?? '';
@@ -87,36 +111,40 @@ export async function streamClaude(req: StreamReq): Promise<{ text: string; sdkS
   const inputSub = getSubscriberClient();
   await inputSub.subscribe(inputChannel(req.sessionId));
 
+  // Build options — tools, plugins, MCP servers vary by group config
+  const mcpServers: Record<string, any> = {
+    ted: tedServer,
+    ...userMcpServers,
+    ...extraMcpServers,
+  };
+
+  const plugins = agentCfg.includePlugins
+    ? [
+        { type: 'local' as const, path: REPO_PLUGIN_DIR },
+        { type: 'local' as const, path: LOCAL_PLUGIN_DIR },
+      ]
+    : [];
+
+  const additionalDirectories = agentCfg.includePlugins
+    ? [REPO_SKILLS_DIR, LOCAL_SKILLS_DIR]
+    : [];
+
   const options: Options = {
-    model: MODEL,
+    model: agentCfg.model ?? MODEL,
     abortController: abort,
     cwd: process.env.CLAUDE_CWD ?? '/home/ubuntu/sleet1213',
-    additionalDirectories: [REPO_SKILLS_DIR, LOCAL_SKILLS_DIR],
+    additionalDirectories,
     ...(process.env.CLAUDE_CODE_PATH ? { pathToClaudeCodeExecutable: process.env.CLAUDE_CODE_PATH } : {}),
     systemPrompt: systemParts.join('\n\n'),
-    plugins: [
-      { type: 'local', path: REPO_PLUGIN_DIR },
-      { type: 'local', path: LOCAL_PLUGIN_DIR },
-    ],
-    allowedTools: [
-      'Read', 'Write', 'Edit',
-      'Glob', 'Grep',
-      'Bash',
-      'WebSearch', 'WebFetch',
-      'Skill', 'Agent',
-      'TodoWrite',
-      'NotebookEdit',
-      'mcp__*',
-    ],
+    plugins,
+    tools: agentCfg.allowedTools,
+    allowedTools: agentCfg.allowedTools,
     disallowedTools: [],
-    permissionMode: 'bypassPermissions',
+    permissionMode: (agentCfg.permissionMode ?? 'bypassPermissions') as any,
     allowDangerouslySkipPermissions: true,
     settingSources: ['project'],
     includePartialMessages: true,
-    mcpServers: {
-      ted: tedServer,
-      ...userMcpServers,
-    },
+    mcpServers,
     // Resume previous SDK session for multi-turn context
     ...(req.sdkSessionId ? { resume: req.sdkSessionId } : {}),
   };

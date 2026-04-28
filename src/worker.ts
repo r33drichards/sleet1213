@@ -1,5 +1,6 @@
 import { Worker, NativeConnection } from '@temporalio/worker';
 import * as activities from './activities.js';
+import * as scheduleActivities from './schedule-activities.js';
 import { ensureSchema } from './db.js';
 
 async function main() {
@@ -16,7 +17,7 @@ async function main() {
     namespace,
     taskQueue,
     workflowsPath: new URL('./workflows.ts', import.meta.url).pathname,
-    activities,
+    activities: { ...activities, ...scheduleActivities },
   });
 
   console.log(`Worker listening on task queue "${taskQueue}" at ${address}`);

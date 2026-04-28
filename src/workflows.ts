@@ -6,8 +6,9 @@ import {
   workflowInfo,
 } from '@temporalio/workflow';
 import type * as activities from './activities.js';
+import type * as scheduleActivities from './schedule-activities.js';
 import { userMessageSignal, closeSignal, transcriptQuery } from './signals.js';
-import type { Msg } from './types.js';
+import type { AgentConfig, Msg } from './types.js';
 
 const { streamClaude, persistTurn, generateTitle } = proxyActivities<
   typeof activities
@@ -44,6 +45,7 @@ export async function chatSession(
   seedHistory: Msg[] = [],
   userId: string = '',
   seedSdkSessionId: string = '',
+  agentConfig?: AgentConfig,
 ): Promise<void> {
   const inbox: string[] = [];
   const history: Msg[] = [...seedHistory];
@@ -81,6 +83,7 @@ export async function chatSession(
           history,
           userId,
           sdkSessionId: sdkSessionId || undefined,
+          agentConfig,
         });
       } finally {
         activityDone = true;
@@ -124,7 +127,27 @@ export async function chatSession(
     }
 
     if (workflowInfo().historyLength > HISTORY_LENGTH_LIMIT) {
-      await continueAsNew<typeof chatSession>(sessionId, history, userId, sdkSessionId);
+      await continueAsNew<typeof chatSession>(sessionId, history, userId, sdkSessionId, agentConfig);
     }
   }
+}
+
+// ---------------------------------------------------------------------------
+// scheduledPrompt — a short-lived workflow started by Temporal Schedules.
+// It fires a prompt into an existing chatSession by HTTP-POSTing to the
+// local webhook, exactly like the IRC bridge does. The chatSession handles
+// the rest (signal-with-start, streaming, etc.).
+// ---------------------------------------------------------------------------
+const { fireScheduledPrompt } = proxyActivities<typeof scheduleActivities>({
+  startToCloseTimeout: '30 seconds',
+  retry: { maximumAttempts: 2 },
+});
+
+export async function scheduledPrompt(
+  sessionId: string,
+  userId: string,
+  prompt: string,
+): Promise<void> {
+  const taggedPrompt = `[SCHEDULED] ${prompt}`;
+  await fireScheduledPrompt({ sessionId, userId, prompt: taggedPrompt });
 }

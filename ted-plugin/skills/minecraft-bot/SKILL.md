@@ -24,7 +24,21 @@ Don't make up method names or param shapes — the mod is the source of truth:
 /var/lib/btone/source/bin/btone-cli describe player.state # full param + return schema
 ```
 
-## Common operations
+## Meteor modules vs RPC
+
+**For automation/background tasks** (auto-craft, auto-eat, flee from danger, inventory management):
+- ✅ **Create a Meteor module** (see `btone-mod-capabilities` skill)
+- Modules run on the game tick loop with direct client access
+- More reliable for GUI interactions (crafting, containers, inventory)
+- Example: `AutoCraftBread`, `EnsureFoodInHotbar`, `RunAwayFromDanger`
+
+**For one-off commands or external orchestration** (pathfind, report state, chat):
+- ✅ **Use RPC via btone-cli**
+- Better for reactive commands triggered by Twitch chat
+- Vision/state queries that you need to inspect
+- Example: `player.state`, `baritone.goto`, `world.screenshot`
+
+## Common RPC operations
 
 ```bash
 # State (alive? hp? where?)
@@ -47,6 +61,10 @@ Don't make up method names or param shapes — the mod is the source of truth:
 /var/lib/btone/source/bin/btone-cli container.open --params '{"x":1012,"y":69,"z":826}'
 /var/lib/btone/source/bin/btone-cli container.state
 /var/lib/btone/source/bin/btone-cli container.close
+
+# Toggle Meteor modules (auto-behaviors)
+/var/lib/btone/source/bin/btone-cli meteor.toggle --params '{"name":"auto-craft-bread","enable":true}'
+/var/lib/btone/source/bin/btone-cli meteor.list  # see all available modules
 
 # Recover from death
 /var/lib/btone/source/bin/btone-cli player.respawn

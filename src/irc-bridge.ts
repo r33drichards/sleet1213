@@ -1,5 +1,6 @@
 // @ts-ignore — no type declarations for irc-framework
 import IRC from 'irc-framework';
+import { loadNickGroups, resolveNickGroup, type NickGroupsConfig } from './nick-groups.js';
 
 /**
  * Split arbitrary text into IRC-safe PRIVMSG payloads:
@@ -43,7 +44,9 @@ type Config = {
   tls: boolean;
   nick: string;
   channel: string;
+  /** Default sessionId (used when nick groups are not configured) */
   sessionId: string;
+  /** Default userId (used when nick groups are not configured) */
   userId: string;
   webhookUrl: string;
   password?: string;
@@ -51,14 +54,21 @@ type Config = {
    * Comma-separated list of IRC nicks (case-insensitive) whose chat lines are
    * forwarded to the agent. Empty/unset = forward everyone. Set to e.g.
    * `lokvolt` so random Twitch viewers can't trigger Claude turns.
+   * Legacy — superseded by nickGroups when present.
    */
   allowedNicks?: Set<string>;
   /**
    * If set, only messages that mention the bot (e.g. `@sleet1213 ...` or just
    * `sleet1213` as a token) are forwarded. Defaults to true on Twitch since
    * the bot is the broadcaster and ambient chatter shouldn't trigger turns.
+   * Legacy default — groups override this per-group.
    */
   requireMention: boolean;
+  /**
+   * Nick groups configuration. When present, supersedes allowedNicks.
+   * Each group maps nicks to a userId, sessionId, and agent config.
+   */
+  nickGroups?: NickGroupsConfig;
 };
 
 function must(name: string): string {
@@ -78,6 +88,14 @@ function loadConfig(): Config {
     : undefined;
   const requireMentionRaw = (process.env.IRC_REQUIRE_MENTION ?? 'true').trim().toLowerCase();
   const requireMention = requireMentionRaw !== 'false' && requireMentionRaw !== '0';
+  // Try loading nick groups config — supersedes IRC_ALLOWED_NICKS when present
+  const nickGroups = loadNickGroups() ?? undefined;
+  if (nickGroups) {
+    console.log(
+      `[irc] nick groups loaded: ${nickGroups.groups.map((g) => `${g.name}(${g.nicks.join(',')})`).join(', ')}`,
+    );
+  }
+
   return {
     server: must('IRC_SERVER'),
     port: Number(process.env.IRC_PORT ?? 6667),
@@ -90,6 +108,7 @@ function loadConfig(): Config {
     password: process.env.IRC_PASSWORD,
     allowedNicks,
     requireMention,
+    nickGroups,
   };
 }
 
@@ -104,14 +123,17 @@ async function postToWebhook(
   cfg: Config,
   msg: string,
   extra?: Record<string, unknown>,
+  overrides?: { userId?: string; sessionId?: string },
 ): Promise<void> {
+  const userId = overrides?.userId ?? cfg.userId;
+  const sessionId = overrides?.sessionId ?? cfg.sessionId;
   const res = await fetch(`${cfg.webhookUrl}/message`, {
     method: 'POST',
     headers: {
       'content-type': 'application/json',
-      'X-User-ID': cfg.userId,
+      'X-User-ID': userId,
     },
-    body: JSON.stringify({ sessionId: cfg.sessionId, msg, ...extra }),
+    body: JSON.stringify({ sessionId, msg, ...extra }),
   });
   if (!res.ok) {
     const body = await res.text().catch(() => '');
@@ -162,9 +184,12 @@ async function streamToIrc(
   cfg: Config,
   signal: AbortSignal,
   sendPrivmsg: (text: string) => void,
+  sessionOverride?: { sessionId: string; userId: string },
 ): Promise<void> {
-  const url = `${cfg.webhookUrl}/sessions/${encodeURIComponent(cfg.sessionId)}/stream`;
-  const headers = { 'X-User-ID': cfg.userId };
+  const sessionId = sessionOverride?.sessionId ?? cfg.sessionId;
+  const userId = sessionOverride?.userId ?? cfg.userId;
+  const url = `${cfg.webhookUrl}/sessions/${encodeURIComponent(sessionId)}/stream`;
+  const headers = { 'X-User-ID': userId };
 
   // Chat output strategy:
   //   * `tool_call`   → post `[using TOOL]` live (progress signal)
@@ -222,6 +247,41 @@ async function streamToIrc(
       postedFinal = false;
     }
   }
+}
+
+/**
+ * Tiny HTTP server on the IRC bridge for echo requests.
+ * POST /echo { "text": "..." } → sends text to the IRC channel.
+ * Used by the Temporal scheduler to surface scheduled prompts in chat.
+ */
+async function startEchoServer(
+  sendPrivmsg: (text: string) => void,
+  port: number,
+): Promise<void> {
+  const { createServer } = await import('node:http');
+  const server = createServer(async (req, res) => {
+    if (req.method === 'POST' && req.url === '/echo') {
+      let body = '';
+      for await (const chunk of req) body += chunk;
+      try {
+        const { text } = JSON.parse(body);
+        if (typeof text === 'string' && text.trim()) {
+          for (const chunk of chunkForIrc(text)) sendPrivmsg(chunk);
+        }
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end('{"ok":true}');
+      } catch {
+        res.writeHead(400);
+        res.end('{"error":"bad json"}');
+      }
+    } else {
+      res.writeHead(404);
+      res.end('{"error":"not found"}');
+    }
+  });
+  server.listen(port, '127.0.0.1', () => {
+    console.log(`[irc] echo server listening on 127.0.0.1:${port}`);
+  });
 }
 
 async function main() {
@@ -286,6 +346,30 @@ async function main() {
       // Ignore own messages and any stale instances with the same base nick
       const baseNick = (process.env.IRC_NICK ?? 'sleet1213');
       if (event.nick.startsWith(baseNick)) return;
+
+      // --- Nick groups path (new) ---
+      if (cfg.nickGroups) {
+        const group = resolveNickGroup(event.nick, cfg.nickGroups);
+        if (!group) return; // nick not in any group, drop silently
+
+        // Per-group mention filter
+        if (group.requireMention && !isMentioned(event.message, cfg.nick)) {
+          return;
+        }
+
+        const payload = `${event.nick}: ${event.message}`;
+        postToWebhook(
+          cfg,
+          payload,
+          { agentConfig: group.agentConfig },
+          { userId: group.userId, sessionId: group.sessionId },
+        ).catch((err) =>
+          console.error(`[irc] webhook post failed (group=${group.name}):`, (err as Error).message),
+        );
+        return;
+      }
+
+      // --- Legacy path (IRC_ALLOWED_NICKS flat set) ---
       // Allowlist filter: if IRC_ALLOWED_NICKS is set, only those nicks trigger
       // an agent turn. Other lines are silently ignored (no webhook call).
       if (cfg.allowedNicks && !cfg.allowedNicks.has(event.nick.toLowerCase())) {
@@ -316,6 +400,12 @@ async function main() {
     client.say(cfg.channel, text);
   };
 
+  // Start the echo server so the scheduler can surface prompts in chat.
+  const echoPort = Number(process.env.IRC_ECHO_PORT ?? 8790);
+  startEchoServer(sendPrivmsg, echoPort).catch((err) =>
+    console.error('[irc] echo server failed:', (err as Error).message),
+  );
+
   const abort = new AbortController();
   process.on('SIGINT', () => {
     abort.abort();
@@ -323,16 +413,43 @@ async function main() {
     process.exit(0);
   });
 
-  // Stream webhook responses back to IRC
-  while (!abort.signal.aborted) {
-    try {
-      await streamToIrc(cfg, abort.signal, sendPrivmsg);
-    } catch (err) {
-      if (abort.signal.aborted) return;
-      console.error('[irc] stream error:', (err as Error).message);
-      await new Promise((r) => setTimeout(r, 2000));
+  // Collect all (sessionId, userId) pairs to stream from.
+  // With nick groups, each group has its own session; without, just the
+  // default cfg.sessionId / cfg.userId.
+  type StreamTarget = { sessionId: string; userId: string };
+  const streamTargets: StreamTarget[] = [];
+
+  if (cfg.nickGroups) {
+    const seen = new Set<string>();
+    for (const g of cfg.nickGroups.groups) {
+      const key = `${g.userId}:${g.sessionId}`;
+      if (!seen.has(key)) {
+        seen.add(key);
+        streamTargets.push({ sessionId: g.sessionId, userId: g.userId });
+      }
+    }
+  } else {
+    streamTargets.push({ sessionId: cfg.sessionId, userId: cfg.userId });
+  }
+
+  // Stream webhook responses back to IRC — one loop per session target.
+  // All run concurrently; each reconnects independently on error.
+  async function runStreamLoop(target: StreamTarget) {
+    while (!abort.signal.aborted) {
+      try {
+        await streamToIrc(cfg, abort.signal, sendPrivmsg, target);
+      } catch (err) {
+        if (abort.signal.aborted) return;
+        console.error(
+          `[irc] stream error (session=${target.sessionId}):`,
+          (err as Error).message,
+        );
+        await new Promise((r) => setTimeout(r, 2000));
+      }
     }
   }
+
+  await Promise.all(streamTargets.map(runStreamLoop));
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) {
