@@ -12,9 +12,12 @@ import {
 } from './db.js';
 import { createTedMcpServer } from './memory-mcp.js';
 import type { AgentConfig, Role, StreamReq } from './types.js';
-import { DEFAULT_ADMIN_CONFIG } from './nick-groups.js';
+import { DEFAULT_PUBLIC_CONFIG } from './nick-groups.js';
 
 const MODEL = process.env.ANTHROPIC_MODEL ?? 'claude-sonnet-4-5';
+// Hard cap on a single streamClaude turn. Long baritone tool calls can
+// run 5-15 min legitimately; anything past this is treated as a stall.
+const TURN_TIMEOUT_MS = Number(process.env.TURN_TIMEOUT_MS ?? 20 * 60 * 1000);
 
 /**
  * Stream an assistant turn using the Claude Agent SDK.
@@ -28,13 +31,22 @@ const MODEL = process.env.ANTHROPIC_MODEL ?? 'claude-sonnet-4-5';
  * message (allowing it to mark partial output appropriately).
  */
 export async function streamClaude(req: StreamReq): Promise<{ text: string; sdkSessionId: string; interrupted: boolean }> {
-  // Resolve agent config — use per-group config if provided, else default admin
-  const agentCfg: AgentConfig = req.agentConfig ?? DEFAULT_ADMIN_CONFIG;
+  // Resolve agent config — use per-group config if provided, else default to
+  // public (least-privilege). Admin access requires an explicit agentConfig
+  // from the IRC bridge's nick-group lookup. This is defense-in-depth:
+  // any code path that forgets to pass agentConfig gets public restrictions
+  // instead of accidentally granting admin.
+  const agentCfg: AgentConfig = req.agentConfig ?? DEFAULT_PUBLIC_CONFIG;
 
   const memoryCtx = agentCfg.includeUserMcpServers
     ? await loadMemoryContext(req.userId)
     : '';
-  const tedServer = createTedMcpServer(req.userId);
+  // Only expose mcp_add/mcp_list/mcp_remove tools when the agent has
+  // includeUserMcpServers (admin). Public agents get memory + schedule
+  // tools only — no MCP server management.
+  const tedServer = createTedMcpServer(req.userId, {
+    includeMcpManagement: agentCfg.includeUserMcpServers,
+  });
 
   // Build MCP servers from user's DB config (only if the group allows it)
   const userMcpServers: Record<string, any> = {};
@@ -109,6 +121,15 @@ export async function streamClaude(req: StreamReq): Promise<{ text: string; sdkS
   const abort = new AbortController();
   Context.current().cancellationSignal.addEventListener('abort', () => abort.abort());
 
+  // Turn-timeout watchdog. If the SDK hasn't returned within
+  // TURN_TIMEOUT_MS, abort it so the workflow can move on to the next
+  // queued message rather than holding the lane forever.
+  let timedOut = false;
+  const turnTimer = setTimeout(() => {
+    timedOut = true;
+    abort.abort();
+  }, TURN_TIMEOUT_MS);
+
   const cancelSub = getSubscriberClient();
   await cancelSub.subscribe(cancelChannel(req.sessionId));
   cancelSub.on('message', () => abort.abort());
@@ -151,7 +172,7 @@ export async function streamClaude(req: StreamReq): Promise<{ text: string; sdkS
     disallowedTools: agentCfg.disallowedTools ?? [],
     permissionMode: (agentCfg.permissionMode ?? 'bypassPermissions') as any,
     allowDangerouslySkipPermissions: true,
-    settingSources: ['project'],
+    settingSources: ['project', 'local'],
     includePartialMessages: true,
     mcpServers,
     // Resume previous SDK session for multi-turn context
@@ -332,6 +353,7 @@ export async function streamClaude(req: StreamReq): Promise<{ text: string; sdkS
     }
   } finally {
     clearInterval(hbTick);
+    clearTimeout(turnTimer);
     if (graceTimer) clearTimeout(graceTimer);
     inputClosed = true;
     const wake = wakeRef.fn;
@@ -348,7 +370,10 @@ export async function streamClaude(req: StreamReq): Promise<{ text: string; sdkS
     // so chat isn't silent after [using Tool] lines.
     if (assistantTexts.length === 0) {
       if (interrupted) {
-        await publishFinalText(req.sessionId, '[interrupted by user]');
+        const marker = timedOut
+          ? `[interrupted: turn exceeded ${Math.round(TURN_TIMEOUT_MS / 60000)} min — try again]`
+          : '[interrupted by user]';
+        await publishFinalText(req.sessionId, marker);
       } else if (lastAssistantText) {
         await publishFinalText(req.sessionId, lastAssistantText);
         assistantTexts.push(lastAssistantText);
