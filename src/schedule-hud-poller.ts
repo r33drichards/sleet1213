@@ -45,9 +45,10 @@ function calendarToCron(cal: any): string {
     if (ranges.length === 1) {
       const r = ranges[0];
       if (r.start === r.end) return String(r.start);
-      if (r.start === allStart && r.end === allEnd) return '*';
-      // Step pattern
+      // Step pattern must precede the full-range collapse — otherwise
+      // {start:0,end:23,step:2} renders as `*` instead of `*/2`.
       if (r.start === allStart && r.step > 1) return `*/${r.step}`;
+      if (r.start === allStart && r.end === allEnd) return '*';
     }
     // Multiple specific values
     return ranges.map((r: any) => {
