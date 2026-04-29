@@ -148,7 +148,7 @@ async function* readSse(
   url: string,
   headers: Record<string, string>,
   signal: AbortSignal,
-): AsyncGenerator<string> {
+): AsyncGenerator<{ id: string; data: string }> {
   const res = await fetch(url, { headers, signal });
   if (!res.ok || !res.body) {
     throw new Error(`sse ${res.status}`);
@@ -157,6 +157,7 @@ async function* readSse(
   const decoder = new TextDecoder('utf-8');
   let buf = '';
   let dataLines: string[] = [];
+  let eventId = '';
   while (true) {
     const { value, done } = await reader.read();
     if (done) return;
@@ -167,7 +168,7 @@ async function* readSse(
       buf = buf.slice(nl + 1);
       if (raw === '') {
         if (dataLines.length) {
-          yield dataLines.join('\n');
+          yield { id: eventId, data: dataLines.join('\n') };
           dataLines = [];
         }
         continue;
@@ -175,6 +176,8 @@ async function* readSse(
       if (raw.startsWith(':')) continue;
       if (raw.startsWith('data:')) {
         dataLines.push(raw.slice(5).replace(/^ /, ''));
+      } else if (raw.startsWith('id:')) {
+        eventId = raw.slice(3).replace(/^ /, '');
       }
     }
   }
@@ -184,12 +187,17 @@ async function streamToIrc(
   cfg: Config,
   signal: AbortSignal,
   sendPrivmsg: (text: string) => void,
+  cursor: { lastEventId: string },
   sessionOverride?: { sessionId: string; userId: string },
 ): Promise<void> {
   const sessionId = sessionOverride?.sessionId ?? cfg.sessionId;
   const userId = sessionOverride?.userId ?? cfg.userId;
   const url = `${cfg.webhookUrl}/sessions/${encodeURIComponent(sessionId)}/stream`;
-  const headers = { 'X-User-ID': userId };
+  // Last-Event-ID lets the webhook resume the Redis-backed stream at the
+  // last event we acknowledged, so reconnects after `terminated` errors
+  // don't drop events emitted during the gap.
+  const headers: Record<string, string> = { 'X-User-ID': userId };
+  if (cursor.lastEventId) headers['Last-Event-ID'] = cursor.lastEventId;
 
   // Chat output strategy:
   //   * `tool_call`   → post `[using TOOL]` live (progress signal)
@@ -208,7 +216,8 @@ async function streamToIrc(
   let thinking = '';
   let pending = '';
   let postedFinal = false;
-  for await (const data of readSse(url, headers, signal)) {
+  for await (const { id, data } of readSse(url, headers, signal)) {
+    if (id) cursor.lastEventId = id;
     let event: { type: string; text?: string; name?: string };
     try {
       event = JSON.parse(data);
@@ -438,14 +447,16 @@ async function main() {
   // Stream webhook responses back to IRC — one loop per session target.
   // All run concurrently; each reconnects independently on error.
   async function runStreamLoop(target: StreamTarget) {
+    const cursor = { lastEventId: '' };
     while (!abort.signal.aborted) {
       try {
-        await streamToIrc(cfg, abort.signal, sendPrivmsg, target);
+        await streamToIrc(cfg, abort.signal, sendPrivmsg, cursor, target);
       } catch (err) {
         if (abort.signal.aborted) return;
         console.error(
           `[irc] stream error (session=${target.sessionId}):`,
           (err as Error).message,
+          cursor.lastEventId ? `(resume after ${cursor.lastEventId})` : '',
         );
         await new Promise((r) => setTimeout(r, 2000));
       }
